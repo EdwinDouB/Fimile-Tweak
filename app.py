@@ -3,12 +3,23 @@ import pymysql
 import streamlit as st
 
 
+import pymysql
+import streamlit as st
+import pandas as pd
+
 def get_conn():
-    host = st.secrets["MYSQL_HOST"]
+    host = st.secrets.get("MYSQL_HOST", "")
     port = int(st.secrets.get("MYSQL_PORT", 3306))
-    user = st.secrets["MYSQL_USERNAME"]
-    password = st.secrets["MYSQL_PASSWORD"]
-    db = st.secrets["MYSQL_DATABASE"]
+    user = st.secrets.get("MYSQL_USERNAME", "")
+    password = st.secrets.get("MYSQL_PASSWORD", "")
+    db = st.secrets.get("MYSQL_DATABASE", "")
+
+    # 可选 SSL（有些公司库强制 TLS）
+    ssl = None
+    if st.secrets.get("MYSQL_SSL", "false").lower() == "true":
+        # 最简单的“启用 TLS”方式：ssl={}
+        # 如果你们有 CA 文件，再扩展为 ssl={"ca": "..."} 等
+        ssl = {}
 
     return pymysql.connect(
         host=host,
@@ -16,6 +27,7 @@ def get_conn():
         user=user,
         password=password,
         database=db,
+        ssl=ssl,
         cursorclass=pymysql.cursors.DictCursor,
         connect_timeout=10,
         read_timeout=30,
@@ -23,9 +35,15 @@ def get_conn():
         autocommit=True,
     )
 
-
 def query_df(sql: str, params=None) -> pd.DataFrame:
-    conn = get_conn()
+    try:
+        conn = get_conn()
+    except Exception as e:
+        # 关键：把错误码显示出来（不显示敏感内容）
+        code = getattr(e, "args", [None])[0]
+        st.error(f"MySQL 连接失败。错误码={code}（去 Streamlit Cloud logs 看原始错误原因）")
+        raise
+
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params or ())
@@ -33,8 +51,6 @@ def query_df(sql: str, params=None) -> pd.DataFrame:
         return pd.DataFrame(rows)
     finally:
         conn.close()
-
-
 def main():
     st.set_page_config(page_title="DB Table Explorer", layout="wide")
     st.title("MySQL 表名/字段快速查看")
@@ -133,3 +149,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
