@@ -67,7 +67,7 @@ def list_tables(schema: str) -> list[str]:
 
 def list_columns(schema: str, TABLE_NAME: str) -> list[str]:
     sql = """
-    SELECT COLUMN
+    SELECT COLUMN_NAME
     FROM information_schema.columns
     WHERE table_schema = %s AND TABLE_NAME = %s
     ORDER BY ordinal_position
@@ -75,7 +75,7 @@ def list_columns(schema: str, TABLE_NAME: str) -> list[str]:
     df = query_df(sql, (schema, TABLE_NAME))
     if df.empty:
         return []
-    return df["COLUMN"].tolist()
+    return df["COLUMN_NAME"].tolist()
 
 
 def maybe_pick(default: str, options: list[str]) -> str:
@@ -293,5 +293,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
