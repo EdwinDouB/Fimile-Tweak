@@ -54,25 +54,25 @@ def safe_ident(name: str) -> str:
 
 def list_tables(schema: str) -> list[str]:
     sql = """
-    SELECT table_name
+    SELECT TABLE_NAME
     FROM information_schema.tables
     WHERE table_schema = %s
-    ORDER BY table_name
+    ORDER BY TABLE_NAME
     """
     df = query_df(sql, (schema,))
     if df.empty:
         return []
-    return df["table_name"].tolist()
+    return df["TABLE_NAME"].tolist()
 
 
-def list_columns(schema: str, table_name: str) -> list[str]:
+def list_columns(schema: str, TABLE_NAME: str) -> list[str]:
     sql = """
     SELECT column_name
     FROM information_schema.columns
-    WHERE table_schema = %s AND table_name = %s
+    WHERE table_schema = %s AND TABLE_NAME = %s
     ORDER BY ordinal_position
     """
-    df = query_df(sql, (schema, table_name))
+    df = query_df(sql, (schema, TABLE_NAME))
     if df.empty:
         return []
     return df["column_name"].tolist()
@@ -84,7 +84,7 @@ def maybe_pick(default: str, options: list[str]) -> str:
 
 def build_and_run_ofd_report(
     schema: str,
-    table_name: str,
+    TABLE_NAME: str,
     selected_date,
     package_col: str,
     status_col: str,
@@ -99,7 +99,7 @@ def build_and_run_ofd_report(
     success_keywords: list[str],
 ) -> pd.DataFrame:
     schema_i = safe_ident(schema)
-    table_i = safe_ident(table_name)
+    table_i = safe_ident(TABLE_NAME)
 
     package_i = safe_ident(package_col)
     status_i = safe_ident(status_col)
@@ -218,10 +218,10 @@ def main():
         st.stop()
 
     default_table = "station_delivery_details" if "station_delivery_details" in tables else tables[0]
-    table_name = st.selectbox("轨迹/派送事件表", tables, index=tables.index(default_table))
+    TABLE_NAME = st.selectbox("轨迹/派送事件表", tables, index=tables.index(default_table))
 
     try:
-        columns = list_columns(schema, table_name)
+        columns = list_columns(schema, TABLE_NAME)
     except Exception as e:
         st.error(f"读取字段失败：{e}")
         st.stop()
@@ -265,7 +265,7 @@ def main():
         try:
             result_df = build_and_run_ofd_report(
                 schema=schema,
-                table_name=table_name,
+                TABLE_NAME=TABLE_NAME,
                 selected_date=selected_date,
                 package_col=package_col,
                 status_col=status_col,
@@ -293,3 +293,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
