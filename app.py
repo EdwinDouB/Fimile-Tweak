@@ -417,23 +417,45 @@ def fetch_routes_report(
     package_number: str = "",
     assignee_name: str = "",
 ) -> list[dict[str, Any]]:
-    params: dict[str, Any] = {
-        "date_from": from_date.strftime("%Y-%m-%d"),
-        "date_to": to_date.strftime("%Y-%m-%d"),
-    }
+    base_params: dict[str, Any] = {}
     if route_name.strip():
-        params["route_name"] = route_name.strip()
+        base_params["route_name"] = route_name.strip()
     if address.strip():
-        params["address"] = address.strip()
+        base_params["address"] = address.strip()
     if package_number.strip():
-        params["package_number"] = package_number.strip()
+        base_params["package_number"] = package_number.strip()
     if assignee_name.strip():
-        params["assignee_name"] = assignee_name.strip()
+        base_params["assignee_name"] = assignee_name.strip()
 
-    payload = _get_json(session, "items/do/report", params=params)
-    if isinstance(payload, list):
-        return payload
-    return payload.get("items") or payload.get("data") or payload.get("report") or []
+    # Some tenants require from_date/to_date while others accept date_from/date_to.
+    # Try the documented from_date/to_date first, then fall back for compatibility.
+    param_candidates = [
+        {
+            **base_params,
+            "from_date": from_date.strftime("%Y-%m-%d"),
+            "to_date": to_date.strftime("%Y-%m-%d"),
+        },
+        {
+            **base_params,
+            "date_from": from_date.strftime("%Y-%m-%d"),
+            "date_to": to_date.strftime("%Y-%m-%d"),
+        },
+    ]
+
+    last_error: Exception | None = None
+    for params in param_candidates:
+        try:
+            payload = _get_json(session, "items/do/report", params=params)
+            if isinstance(payload, list):
+                return payload
+            return payload.get("items") or payload.get("data") or payload.get("report") or []
+        except requests.HTTPError as e:
+            last_error = e
+            continue
+
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 def build_report_rows(report_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -742,8 +764,5 @@ def main() -> None:
             st.info("当前环境未能生成 Routes Report Excel（已提供 CSV）。")
 
 
-
 if __name__ == "__main__":
     main()
-
-
