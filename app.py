@@ -56,7 +56,7 @@ def _headers() -> dict[str, str]:
         h["Authorization"] = f"Bearer {BEANS_TOKEN}"
     if BEANS_COOKIE:
         h["Cookie"] = BEANS_COOKIE
-    return h h
+    return h
 
 
 def _get_json(session: requests.Session, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -400,3 +400,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
