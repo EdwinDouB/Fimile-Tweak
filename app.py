@@ -169,7 +169,7 @@ def fetch_assignees(session: requests.Session) -> dict[str, dict[str, Any]]:
     return {a.get("listAssigneeId"): a for a in items if a.get("listAssigneeId")}
 
 
-def fetch_warehouses_from_routes(session: requests.Session) -> dict[str, dict[str, Any]]:␊
+def fetch_warehouses_from_routes(session: requests.Session) -> dict[str, dict[str, Any]]:
     """Fallback: derive warehouse options from routes payload when warehouses API is forbidden."""
     routes = fetch_routes(session)
     out: dict[str, dict[str, Any]] = {}
@@ -375,6 +375,7 @@ def build_rows(
 
 if __name__ == "__main__":
     main()
+
 
 
 
