@@ -54,6 +54,7 @@ OUTPUT_COLUMNS = [
     "dsp_driver",
     "delivery_count",
     "pickup_count",
+    "failed_count",
     "listRouteId",
     "listWarehouseId",
     "listAssigneeId",
@@ -143,10 +144,47 @@ def _extract_dsp(route_name: str) -> str:
     return ""
 
 
+def _normalize_date_str(raw: Any) -> str:
+    s = _safe_str(raw).strip()
+    if not s:
+        return ""
+
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    try:
+        return datetime.strptime(s, "%m/%d/%Y").strftime("%Y-%m-%d")
+    except Exception:
+        pass
+
+    if s.isdigit():
+        ts = int(s)
+        if ts > 10_000_000_000:
+            ts = ts / 1000
+        try:
+            return datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    return ""
+
+
 def _parse_date(route: dict[str, Any]) -> str:
-    ds = route.get("dateStr")
-    if ds:
-        return _safe_str(ds)
+    for k in [
+        "dateStr",
+        "date",
+        "routeDate",
+        "routeDateStr",
+        "startDate",
+        "scheduledDate",
+        "startTsMillis",
+        "routeTsMillis",
+    ]:
+        ds = _normalize_date_str(route.get(k))
+        if ds:
+            return ds
 
     name = _safe_str(route.get("name"))
     m = re.search(r"(\d{2})/(\d{2})", name)
@@ -162,13 +200,24 @@ def _compute_planned_actual(stop_metrics: list[dict[str, Any]] | None, metric_ty
     planned = 0
     actual = 0
     for x in stop_metrics or []:
-        if x.get("type") != metric_type:
+        if _safe_str(x.get("type")).lower() != metric_type.lower():
             continue
-        pc = int(x.get("packageCount") or 0)
+        pc = int(x.get("packageCount") or x.get("count") or 0)
         planned += pc
-        if x.get("status") == "finished":
+        if _safe_str(x.get("status")).lower() in {"finished", "success", "succeeded", "completed"}:
             actual += pc
     return planned, actual
+
+
+def _compute_failed_count(stop_metrics: list[dict[str, Any]] | None) -> int:
+    total = 0
+    failed_types = {"failed", "fail", "attempted", "attempt"}
+    for x in stop_metrics or []:
+        tp = _safe_str(x.get("type")).lower()
+        status = _safe_str(x.get("status")).lower()
+        if tp in failed_types or status in failed_types:
+            total += int(x.get("packageCount") or x.get("count") or 0)
+    return total
 
 
 def _to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -203,8 +252,25 @@ def _date_in_range(ds: str, start: date | None, end: date | None) -> bool:
 # -----------------------------
 # Fetchers
 # -----------------------------
-def fetch_routes(session: requests.Session) -> list[dict[str, Any]]:
-    payload = _get_json(session, "routes", params={"updatedAfter": 0, "includeToday": "true"})
+def fetch_routes(
+    session: requests.Session,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {
+        "updatedAfter": 0,
+        "includeToday": "true",
+        "includePast": "true",
+        "includeFuture": "true",
+    }
+    if start_date:
+        sd = start_date.strftime("%Y-%m-%d")
+        params.update({"startDate": sd, "dateFrom": sd, "fromDate": sd})
+    if end_date:
+        ed = end_date.strftime("%Y-%m-%d")
+        params.update({"endDate": ed, "dateTo": ed, "toDate": ed})
+
+    payload = _get_json(session, "routes", params=params)
     return payload.get("route") or payload.get("routes") or []
 
 
@@ -321,7 +387,10 @@ def build_rows(
         m = metrics_by_route.get(route_id or "", {})
         stop_metrics = m.get("stopMetrics") or []
         d_plan, d_act = _compute_planned_actual(stop_metrics, "dropoff")
+        if d_plan == 0 and d_act == 0:
+            d_plan, d_act = _compute_planned_actual(stop_metrics, "delivery")
         p_plan, p_act = _compute_planned_actual(stop_metrics, "pickup")
+        failed_count = _compute_failed_count(stop_metrics)
 
         rows.append(
             {
@@ -333,6 +402,7 @@ def build_rows(
                 "dsp_driver": dsp_driver,
                 "delivery_count": f"{d_plan}/{d_act}",
                 "pickup_count": f"{p_plan}/{p_act}",
+                "failed_count": failed_count,
                 "listRouteId": _safe_str(route_id),
                 "listWarehouseId": _safe_str(wh_id),
                 "listAssigneeId": _safe_str(asg_id),
@@ -433,7 +503,7 @@ def main() -> None:
 
             status.text("Fetching routes ...")
             try:
-                routes = fetch_routes(session)
+                routes = fetch_routes(session, start_date=start, end_date=end)
             except Exception as e:  # noqa: BLE001
                 routes = []
                 failures.append({"step": "routes", "reason": _humanize_error(e)})
@@ -493,9 +563,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
