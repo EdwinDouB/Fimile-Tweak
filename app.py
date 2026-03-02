@@ -21,6 +21,13 @@ API_URL_TEMPLATE = os.getenv(
 API_TOKEN = os.getenv("KPI_API_TOKEN", "")
 API_TIMEOUT_SECONDS = int(os.getenv("KPI_API_TIMEOUT_SECONDS", "20"))
 
+POD_IMAGE_EXPORT_N = 5
+
+POD_COLUMNS = []
+for i in range(1, POD_IMAGE_EXPORT_N + 1):
+    POD_COLUMNS += [f"pod_feedback_{i}", f"pod_score_{i}"]
+
+
 OUTPUT_COLUMNS = [
     "trakcing_id",
     "shipperName",
@@ -32,6 +39,7 @@ OUTPUT_COLUMNS = [
     "failed_route",
     "delivered_time",
     "success_route",
+    POD_COLUMNS,
     "创建到入库时间",
     "库内停留时间",
     "尝试配送时间",
@@ -254,6 +262,29 @@ def extract_shipper_name_from_events(events: list[dict[str, Any]]) -> str:
                 return str(name)
     return ""
 
+def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not success_evt:
+        return []
+
+    # 你的示例里 success 事件既有 pod，也可能有 pods.pod[0]
+    pod_obj = success_evt.get("pod")
+    if isinstance(pod_obj, dict):
+        images = pod_obj.get("images")
+        if isinstance(images, list):
+            return [x for x in images if isinstance(x, dict)]
+
+    pods_obj = success_evt.get("pods")
+    if isinstance(pods_obj, dict):
+        pod_list = pods_obj.get("pod")
+        if isinstance(pod_list, list) and pod_list:
+            first_pod = pod_list[0]
+            if isinstance(first_pod, dict):
+                images = first_pod.get("images")
+                if isinstance(images, list):
+                    return [x for x in images if isinstance(x, dict)]
+
+    return []
+    
 
 def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     events = normalize_events(payload)
@@ -304,6 +335,23 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "送达时间": diff_hours(delivered_time, out_for_delivery_time),
         "整体配送时间": diff_hours(delivered_time, created_time),
     }
+        # --- POD feedback / score ---
+    pod_images = extract_pod_images_from_success_event(success_evt)
+
+    for i in range(1, POD_IMAGE_EXPORT_N + 1):
+        feedback_key = f"pod_feedback_{i}"
+        score_key = f"pod_score_{i}"
+        row[feedback_key] = ""
+        row[score_key] = ""
+
+    for i, img in enumerate(pod_images[:POD_IMAGE_EXPORT_N], start=1):
+        q = img.get("quality")
+        if not isinstance(q, dict):
+            continue
+
+        row[f"pod_feedback_{i}"] = str(q.get("feedback") or "")
+        score_val = q.get("score")
+        row[f"pod_score_{i}"] = "" if score_val is None else str(score_val)
     return row
 
 
@@ -462,3 +510,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
