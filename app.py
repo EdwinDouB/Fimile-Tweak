@@ -76,6 +76,21 @@ def _get_json(session: requests.Session, path: str, params: dict[str, Any] | Non
     return r.json()
 
 
+def _humanize_error(e: Exception) -> str:
+    if isinstance(e, requests.HTTPError):
+        res = e.response
+        if res is not None:
+            status = res.status_code
+            url = res.url
+            hint = ""
+            if status in {401, 403}:
+                hint = "（鉴权失败或账号无权限：请检查 BEANS_TOKEN / BEANS_BASIC_AUTH / BEANS_COOKIE）"
+            elif status == 404:
+                hint = "（接口不存在或当前账号不可见）"
+            return f"HTTP {status} @ {url}{hint}"
+    return str(e)
+
+
 def _safe_str(x: Any) -> str:
     return "" if x is None else str(x)
 
@@ -371,7 +386,10 @@ def main() -> None:
                     st.session_state["warehouses"] = wh_by_id
                 except Exception as e:  # noqa: BLE001
                     wh_by_id = {}
-                    failures.append({"step": "warehouses", "reason": str(e)})
+                    failures.append({
+                        "step": "warehouses",
+                        "reason": f"{_humanize_error(e)}；且回退 routes 也失败",
+                    })
 
             asg_by_id: dict[str, dict[str, Any]] = st.session_state.get("assignees", {})
             if not asg_by_id:
@@ -381,21 +399,24 @@ def main() -> None:
                     st.session_state["assignees"] = asg_by_id
                 except Exception as e:  # noqa: BLE001
                     asg_by_id = {}
-                    failures.append({"step": "assignees", "reason": str(e)})
+                    failures.append({
+                        "step": "assignees",
+                        "reason": f"{_humanize_error(e)}；且回退 routes 也失败",
+                    })
 
             status.text("Fetching routes ...")
             try:
                 routes = fetch_routes(session)
             except Exception as e:  # noqa: BLE001
                 routes = []
-                failures.append({"step": "routes", "reason": str(e)})
+                failures.append({"step": "routes", "reason": _humanize_error(e)})
 
             status.text("Fetching routes_metrics ...")
             try:
                 metrics_by_route = fetch_routes_metrics(session, csv_extra_buids=csv_extra_buids)
             except Exception as e:  # noqa: BLE001
                 metrics_by_route = {}
-                failures.append({"step": "routes_metrics", "reason": str(e)})
+                failures.append({"step": "routes_metrics", "reason": _humanize_error(e)})
 
             status.text("Assembling rows ...")
             rows = build_rows(
@@ -445,6 +466,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
