@@ -60,6 +60,15 @@ OUTPUT_COLUMNS = [
     "listAssigneeId",
 ]
 
+REPORT_COLUMNS = [
+    "date",
+    "route_name",
+    "address",
+    "package_number",
+    "assignee_name",
+    "list_route_id",
+]
+
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -399,6 +408,54 @@ def fetch_routes_metrics(session: requests.Session, csv_extra_buids: str) -> dic
     return out
 
 
+def fetch_routes_report(
+    session: requests.Session,
+    from_date: date,
+    to_date: date,
+    route_name: str = "",
+    address: str = "",
+    package_number: str = "",
+    assignee_name: str = "",
+) -> list[dict[str, Any]]:
+    params: dict[str, Any] = {
+        "date_from": from_date.strftime("%Y-%m-%d"),
+        "date_to": to_date.strftime("%Y-%m-%d"),
+    }
+    if route_name.strip():
+        params["route_name"] = route_name.strip()
+    if address.strip():
+        params["address"] = address.strip()
+    if package_number.strip():
+        params["package_number"] = package_number.strip()
+    if assignee_name.strip():
+        params["assignee_name"] = assignee_name.strip()
+
+    payload = _get_json(session, "items/do/report", params=params)
+    if isinstance(payload, list):
+        return payload
+    return payload.get("items") or payload.get("data") or payload.get("report") or []
+
+
+def build_report_rows(report_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in report_items:
+        rows.append(
+            {
+                "date": _normalize_date_str(item.get("date") or item.get("dateStr") or item.get("routeDate")),
+                "route_name": _safe_str(item.get("route_name") or item.get("routeName") or item.get("name")),
+                "address": _safe_str(item.get("address") or item.get("formattedAddress")),
+                "package_number": _safe_str(
+                    item.get("package_number") or item.get("packageNumber") or item.get("trackingId")
+                ),
+                "assignee_name": _safe_str(
+                    item.get("assignee_name") or item.get("assigneeName") or item.get("driver")
+                ),
+                "list_route_id": _safe_str(item.get("list_route_id") or item.get("listRouteId") or item.get("routeId")),
+            }
+        )
+    return rows
+
+
 # -----------------------------
 # Assembly
 # -----------------------------
@@ -500,6 +557,8 @@ def main() -> None:
         st.session_state["assignees"] = {}
     if "result_df" not in st.session_state:
         st.session_state["result_df"] = None
+    if "report_df" not in st.session_state:
+        st.session_state["report_df"] = None
     if "failures" not in st.session_state:
         st.session_state["failures"] = []
 
@@ -599,6 +658,38 @@ def main() -> None:
         st.session_state["failures"] = failures
         status.text("Done")
 
+    st.subheader("4) Routes Report (items/do/report)")
+    r1, r2, r3 = st.columns(3)
+    report_from = r1.date_input("Report from date", value=date.today(), key="report_from")
+    report_to = r2.date_input("Report to date", value=date.today(), key="report_to")
+    report_route_name = r3.text_input("Report route_name（可空）", value="")
+    rr1, rr2, rr3 = st.columns(3)
+    report_address = rr1.text_input("Report address（可空）", value="")
+    report_package_number = rr2.text_input("Report package_number（可空）", value="")
+    report_assignee_name = rr3.text_input("Report assignee_name（可空）", value="")
+
+    if st.button("Fetch Routes Report"):
+        if report_from > report_to:
+            st.error("Report from date 不能大于 to date")
+        else:
+            with requests.Session() as session:
+                try:
+                    report_items = fetch_routes_report(
+                        session=session,
+                        from_date=report_from,
+                        to_date=report_to,
+                        route_name=report_route_name,
+                        address=report_address,
+                        package_number=report_package_number,
+                        assignee_name=report_assignee_name,
+                    )
+                    report_rows = build_report_rows(report_items)
+                    st.session_state["report_df"] = pd.DataFrame(report_rows, columns=REPORT_COLUMNS)
+                    st.success(f"Routes Report 获取成功：{len(report_rows)} 条")
+                except Exception as e:  # noqa: BLE001
+                    st.session_state["report_df"] = None
+                    st.error(f"Routes Report 获取失败：{_humanize_error(e)}")
+
     failures = st.session_state.get("failures", [])
     df: pd.DataFrame | None = st.session_state.get("result_df")
 
@@ -625,7 +716,34 @@ def main() -> None:
         except Exception:
             st.info("当前环境未能生成 Excel（已提供 CSV）。")
 
+    report_df: pd.DataFrame | None = st.session_state.get("report_df")
+    if report_df is not None:
+        st.subheader("Routes Report 预览")
+        st.dataframe(report_df.head(100), use_container_width=True)
+
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        report_csv_data = report_df.to_csv(index=False).encode("utf-8-sig")
+        st.download_button(
+            "下载 Routes Report CSV",
+            data=report_csv_data,
+            file_name=f"routes_report_{stamp}.csv",
+            mime="text/csv",
+        )
+
+        try:
+            report_xlsx_data = _to_excel_bytes(report_df)
+            st.download_button(
+                "下载 Routes Report Excel",
+                data=report_xlsx_data,
+                file_name=f"routes_report_{stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            st.info("当前环境未能生成 Routes Report Excel（已提供 CSV）。")
+
+
 
 if __name__ == "__main__":
     main()
+
 
