@@ -12,24 +12,38 @@ import streamlit as st
 # -----------------------------
 # Config (prefer env vars)
 # -----------------------------
-BASE_URL = os.getenv("BEANS_BASE_URL", "https://isp.beans.ai/enterprise/v1/lists")
-API_TIMEOUT_SECONDS = int(os.getenv("BEANS_TIMEOUT_SECONDS", "30"))
+def _get_config(name: str, default: str = "") -> str:
+    """Read config from env first, then Streamlit secrets."""
+    val = os.getenv(name)
+    if val:
+        return val
+    try:
+        secret_val = st.secrets.get(name)
+    except Exception:  # noqa: BLE001
+        secret_val = None
+    if secret_val is None:
+        return default
+    return str(secret_val)
+
+
+BASE_URL = _get_config("BEANS_BASE_URL", "https://isp.beans.ai/enterprise/v1/lists")
+API_TIMEOUT_SECONDS = int(_get_config("BEANS_TIMEOUT_SECONDS", "30"))
 
 # Use ONE of these auth methods:
 # 1) Basic auth:  export BEANS_BASIC_AUTH="Basic <base64>"
 #    (You can copy the whole 'Basic ...' string from your teammate / DevTools)
 # 2) Bearer token: export BEANS_TOKEN="..."
 # 3) Cookie session: export BEANS_COOKIE="_session_id=...; other_cookie=..."
-BEANS_BASIC_AUTH = os.getenv("BEANS_BASIC_AUTH", "")
-BEANS_TOKEN = os.getenv("BEANS_TOKEN", "")
-# Backward-compatible aliases used by earlier internal scripts.
-KPI_API_TOKEN = os.getenv("KPI_API_TOKEN", "")
-KPI_API_BASIC_AUTH = os.getenv("KPI_API_BASIC_AUTH", "")
-BEANS_COOKIE = os.getenv("BEANS_COOKIE", "")
+BEANS_BASIC_AUTH = _get_config("BEANS_BASIC_AUTH", "")
+BEANS_TOKEN = _get_config("BEANS_TOKEN", "")
+# Backward-compatible aliases used by earlier internal scripts.␊
+KPI_API_TOKEN = _get_config("KPI_API_TOKEN", "")
+KPI_API_BASIC_AUTH = _get_config("KPI_API_BASIC_AUTH", "")
+BEANS_COOKIE = _get_config("BEANS_COOKIE", "")
 
 # Account buid list for routes_metrics (comma separated)
 # Example: export BEANS_ACCOUNT_BUIDS="2c1e8ad1e59945579fa2a992e93932d6"
-BEANS_ACCOUNT_BUIDS = os.getenv("BEANS_ACCOUNT_BUIDS", "")
+BEANS_ACCOUNT_BUIDS = _get_config("BEANS_ACCOUNT_BUIDS", "")
 
 OUTPUT_COLUMNS = [
     "route_code",
@@ -67,6 +81,18 @@ def _headers() -> dict[str, str]:
     if BEANS_COOKIE:
         h["Cookie"] = BEANS_COOKIE
     return h
+
+
+def _auth_status_summary() -> str:
+    has_auth = bool(_headers().get("Authorization"))
+    has_cookie = bool(BEANS_COOKIE.strip())
+    if has_auth and has_cookie:
+        return "Authorization + Cookie"
+    if has_auth:
+        return "Authorization"
+    if has_cookie:
+        return "Cookie"
+    return "none"
 
 
 def _get_json(session: requests.Session, path: str, params: dict[str, Any] | None = None) -> Any:
@@ -330,6 +356,7 @@ def main() -> None:
 - routes_metrics：`BEANS_ACCOUNT_BUIDS`（逗号分隔）
             """.strip()
         )
+        st.caption(f"当前检测到鉴权方式：{_auth_status_summary()}")
 
     # Session state
     if "warehouses" not in st.session_state:
@@ -466,6 +493,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
