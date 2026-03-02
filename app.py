@@ -39,7 +39,7 @@ OUTPUT_COLUMNS = [
 "failed_route",
 "delivered_time",
 "success_route",
-    POD_COLUMNS,
+*POD_COLUMNS,
 "创建到入库时间",
 "库内停留时间",
 "尝试配送时间",
