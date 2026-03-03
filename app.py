@@ -466,6 +466,158 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
     return output.getvalue()
 
 
+def build_kpi_report_payload(result_df: pd.DataFrame) -> dict[str, Any]:
+    df = result_df.copy()
+    df["created_dt"] = to_datetime_series(df, "created_time")
+    df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
+    df["last_scanned_dt"] = to_datetime_series(df, "last_scanned_time")
+    df["ofd_dt"] = to_datetime_series(df, "out_for_delivery_time")
+    df["attempted_dt"] = to_datetime_series(df, "attempted_time")
+    df["delivered_dt"] = to_datetime_series(df, "delivered_time")
+    df["month"] = df["created_dt"].dt.to_period("M").astype(str)
+    df.loc[df["month"] == "NaT", "month"] = "未知"
+
+    metrics: list[dict[str, Any]] = []
+    chart_rows: list[dict[str, Any]] = []
+
+    df["ofd_to_delivered_hours"] = (df["delivered_dt"] - df["ofd_dt"]).dt.total_seconds() / 3600
+    ofd_base = df[df["ofd_dt"].notna()].copy()
+
+    for threshold in [24, 48, 72]:
+        within = ofd_base[
+            ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)
+        ]
+        metric_name = f"<{threshold}h 妥投率"
+        hit_count = len(within)
+        total_count = len(ofd_base)
+        miss_count = max(total_count - hit_count, 0)
+        metrics.append(
+            {
+                "分类": "24/48/72 小时妥投率（上网 -> 妥投）",
+                "指标": metric_name,
+                "命中": hit_count,
+                "总数": total_count,
+                "占比": rate(hit_count, total_count),
+            }
+        )
+        chart_rows.extend(
+            [
+                {"图表": metric_name, "分类": f"<{threshold}h妥投", "数量": hit_count, "占比": rate(hit_count, total_count)},
+                {"图表": metric_name, "分类": f">={threshold}h或未妥投", "数量": miss_count, "占比": rate(miss_count, total_count)},
+            ]
+        )
+
+    df["created_to_scan_hours"] = (df["first_scanned_dt"] - df["created_dt"]).dt.total_seconds() / 3600
+    total_count = len(df)
+    for threshold in [12, 24, 48, 72]:
+        within = df[
+            df["first_scanned_dt"].notna() & (df["created_to_scan_hours"] >= 0) & (df["created_to_scan_hours"] < threshold)
+        ]
+        metric_name = f"<{threshold}h 上网率"
+        hit_count = len(within)
+        miss_count = max(total_count - hit_count, 0)
+        metrics.append(
+            {
+                "分类": "12/24/48/72 小时上网率（提货 -> 上网）",
+                "指标": metric_name,
+                "命中": hit_count,
+                "总数": total_count,
+                "占比": rate(hit_count, total_count),
+            }
+        )
+        chart_rows.extend(
+            [
+                {"图表": metric_name, "分类": f"<{threshold}h上网", "数量": hit_count, "占比": rate(hit_count, total_count)},
+                {"图表": metric_name, "分类": f">={threshold}h或未上网", "数量": miss_count, "占比": rate(miss_count, total_count)},
+            ]
+        )
+
+    has_followup = (
+        (df["last_scanned_dt"].notna() & (df["last_scanned_dt"] > df["first_scanned_dt"]))
+        | df["ofd_dt"].notna()
+        | df["attempted_dt"].notna()
+        | df["delivered_dt"].notna()
+    )
+    scanned_base = df[df["first_scanned_dt"].notna()].copy()
+    scanned_base["lost"] = (~has_followup.loc[scanned_base.index]).astype(int)
+    monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("trakcing_id", "count"), lost=("lost", "sum"))
+    lost_total = int(monthly_lost["lost"].sum()) if not monthly_lost.empty else 0
+    scanned_total = int(monthly_lost["total"].sum()) if not monthly_lost.empty else 0
+    metrics.append(
+        {
+            "分类": "月丢包率（First Scan 后无后续轨迹）",
+            "指标": "整体月丢包率口径",
+            "命中": lost_total,
+            "总数": scanned_total,
+            "占比": rate(lost_total, scanned_total),
+        }
+    )
+    chart_rows.extend(
+        [
+            {"图表": "整体月丢包率口径", "分类": "丢包", "数量": lost_total, "占比": rate(lost_total, scanned_total)},
+            {
+                "图表": "整体月丢包率口径",
+                "分类": "未丢包",
+                "数量": max(scanned_total - lost_total, 0),
+                "占比": rate(max(scanned_total - lost_total, 0), scanned_total),
+            },
+        ]
+    )
+
+    return {
+        "metrics": metrics,
+        "charts": chart_rows,
+        "has_monthly_lost_data": not monthly_lost.empty,
+        "monthly_lost": monthly_lost,
+    }
+
+
+def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any]) -> bytes:
+    output = io.BytesIO()
+    metrics_df = pd.DataFrame(kpi_payload["metrics"])
+    chart_df = pd.DataFrame(kpi_payload["charts"])
+
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        metrics_df.to_excel(writer, index=False, sheet_name="kpi_summary")
+        chart_df.to_excel(writer, index=False, sheet_name="kpi_chart_data")
+
+        workbook = writer.book
+        data_ws = writer.sheets["kpi_chart_data"]
+        chart_ws = workbook.add_worksheet("kpi_charts")
+
+        percent_fmt = workbook.add_format({"num_format": "0.00%"})
+        summary_ws = writer.sheets["kpi_summary"]
+        summary_ws.set_column("A:B", 34)
+        summary_ws.set_column("C:D", 12)
+        summary_ws.set_column("E:E", 14, percent_fmt)
+        data_ws.set_column("A:B", 32)
+        data_ws.set_column("C:C", 12)
+        data_ws.set_column("D:D", 14, percent_fmt)
+
+        row_cursor = 0
+        for chart_name, group in chart_df.groupby("图表", sort=False):
+            rows = group.index.to_list()
+            if not rows:
+                continue
+            excel_rows = [r + 1 for r in rows]
+
+            pie = workbook.add_chart({"type": "pie"})
+            pie.add_series(
+                {
+                    "name": chart_name,
+                    "categories": ["kpi_chart_data", excel_rows[0], 1, excel_rows[-1], 1],
+                    "values": ["kpi_chart_data", excel_rows[0], 2, excel_rows[-1], 2],
+                    "data_labels": {"percentage": True, "category": True},
+                }
+            )
+            pie.set_title({"name": chart_name})
+            pie.set_style(10)
+            chart_ws.insert_chart(row_cursor, 0, pie, {"x_scale": 1.2, "y_scale": 1.2})
+            row_cursor += 18
+
+    return output.getvalue()
+
+
 def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.Series(pd.NaT, index=df.index)
@@ -513,135 +665,71 @@ def render_percentage_pie(
     )
 
 
-def render_kpi_charts(result_df: pd.DataFrame) -> None:
+def render_kpi_charts(result_df: pd.DataFrame) -> dict[str, Any]:
     st.subheader("3) 时效与质量 KPI 图表")
     if result_df.empty:
         st.info("暂无数据，无法计算 KPI。")
-        return
+        return {"metrics": [], "charts": [], "has_monthly_lost_data": False, "monthly_lost": pd.DataFrame()}
 
-    df = result_df.copy()
-    df["created_dt"] = to_datetime_series(df, "created_time")
-    df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
-    df["last_scanned_dt"] = to_datetime_series(df, "last_scanned_time")
-    df["ofd_dt"] = to_datetime_series(df, "out_for_delivery_time")
-    df["attempted_dt"] = to_datetime_series(df, "attempted_time")
-    df["delivered_dt"] = to_datetime_series(df, "delivered_time")
-    df["month"] = df["created_dt"].dt.to_period("M").astype(str)
-    df.loc[df["month"] == "NaT", "month"] = "未知"
-
-    df["ofd_to_delivered_hours"] = (df["delivered_dt"] - df["ofd_dt"]).dt.total_seconds() / 3600
-    ofd_base = df[df["ofd_dt"].notna()].copy()
+    kpi_payload = build_kpi_report_payload(result_df)
 
     st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
     delivered_cols = st.columns(3)
-    for i, threshold in enumerate([24, 48, 72]):
-        within = ofd_base[
-            ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)
-        ]
+    delivered_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "24/48/72 小时妥投率（上网 -> 妥投）"]
+    for i, metric in enumerate(delivered_metrics):
+        threshold = metric["指标"].replace("<", "").replace("h 妥投率", "")
         delivered_cols[i].metric(
-            f"<{threshold}h 妥投率",
-            f"{rate(len(within), len(ofd_base)):.2%}",
-            f"{len(within)}/{len(ofd_base)}",
+            metric["指标"],
+            f"{metric['占比']:.2%}",
+            f"{metric['命中']}/{metric['总数']}",
         )
         render_percentage_pie(
             title=f"<{threshold}h 妥投占比",
-            hit_count=len(within),
-            total_count=len(ofd_base),
+            hit_count=int(metric["命中"]),
+            total_count=int(metric["总数"]),
             hit_label=f"<{threshold}h妥投",
             miss_label=f">={threshold}h或未妥投",
         )
 
     st.markdown("#### 12/24/48/72 小时上网率（提货 -> 上网）")
-    df["created_to_scan_hours"] = (df["first_scanned_dt"] - df["created_dt"]).dt.total_seconds() / 3600
     scan_cols = st.columns(4)
-    total_count = len(df)
-    for i, threshold in enumerate([12, 24, 48, 72]):
-        within = df[
-            df["first_scanned_dt"].notna() & (df["created_to_scan_hours"] >= 0) & (df["created_to_scan_hours"] < threshold)
-        ]
+    scan_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "12/24/48/72 小时上网率（提货 -> 上网）"]
+    for i, metric in enumerate(scan_metrics):
+        threshold = metric["指标"].replace("<", "").replace("h 上网率", "")
         scan_cols[i].metric(
-            f"<{threshold}h 上网率",
-            f"{rate(len(within), total_count):.2%}",
-            f"{len(within)}/{total_count}",
+            metric["指标"],
+            f"{metric['占比']:.2%}",
+            f"{metric['命中']}/{metric['总数']}",
         )
         render_percentage_pie(
             title=f"<{threshold}h 上网占比",
-            hit_count=len(within),
-            total_count=total_count,
+            hit_count=int(metric["命中"]),
+            total_count=int(metric["总数"]),
             hit_label=f"<{threshold}h上网",
             miss_label=f">={threshold}h或未上网",
         )
 
     st.markdown("#### 月丢包率（First Scan 后无后续轨迹）")
-    has_followup = (
-        (df["last_scanned_dt"].notna() & (df["last_scanned_dt"] > df["first_scanned_dt"]))
-        | df["ofd_dt"].notna()
-        | df["attempted_dt"].notna()
-        | df["delivered_dt"].notna()
-    )
-    scanned_base = df[df["first_scanned_dt"].notna()].copy()
-    scanned_base["lost"] = (~has_followup.loc[scanned_base.index]).astype(int)
-    monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("trakcing_id", "count"), lost=("lost", "sum"))
-    if not monthly_lost.empty:
-        lost_total = int(monthly_lost["lost"].sum())
-        scanned_total = int(monthly_lost["total"].sum())
-        st.metric("整体月丢包率口径", f"{rate(lost_total, scanned_total):.2%}")
-        render_percentage_pie("丢包占比", lost_total, scanned_total, hit_label="丢包", miss_label="未丢包")
+    monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
+    if kpi_payload.get("has_monthly_lost_data") and monthly_lost_metric:
+        st.metric("整体月丢包率口径", f"{monthly_lost_metric['占比']:.2%}")
+        render_percentage_pie(
+            "丢包占比",
+            int(monthly_lost_metric["命中"]),
+            int(monthly_lost_metric["总数"]),
+            hit_label="丢包",
+            miss_label="未丢包",
+        )
     else:
         st.info("没有 First Scan 数据，无法计算月丢包率。")
 
     st.markdown("#### 月破损率（预留）")
     st.info("预留区域：月破损率指标待后续开发。")
 
-    st.markdown("#### 24小时首次尝试派送率")
-    created_base = df[df["created_dt"].notna()].copy()
-
-    attempt_hours = (created_base["attempted_dt"] - created_base["created_dt"]).dt.total_seconds() / 3600
-    delivered_hours = (created_base["delivered_dt"] - created_base["created_dt"]).dt.total_seconds() / 3600
-
-    created_base["first_attempt_within_24h"] = (
-        (created_base["attempted_dt"].notna() & (attempt_hours >= 0) & (attempt_hours <= 24))
-        | (created_base["delivered_dt"].notna() & (delivered_hours >= 0) & (delivered_hours <= 24))
-    )
-    first_attempt_hits = int(created_base["first_attempt_within_24h"].fillna(False).sum())
-    st.metric(
-        "24h 首次尝试派送率",
-        f"{rate(first_attempt_hits, len(created_base)):.2%}",
-        f"{first_attempt_hits}/{len(created_base)}",
-    )
-    if not created_base.empty:
-        render_percentage_pie(
-            "24h 首次尝试派送占比",
-            first_attempt_hits,
-            len(created_base),
-            hit_label="24h内首次尝试",
-            miss_label="超24h或未尝试",
-        )
-
-    st.markdown("#### 24小时第一次派送成功率")
-    created_base["first_success_within_24h"] = (
-        created_base["attempted_dt"].isna()
-        & created_base["delivered_dt"].notna()
-        & (delivered_hours >= 0)
-        & (delivered_hours <= 24)
-    )
-    first_success_hits = int(created_base["first_success_within_24h"].fillna(False).sum())
-    st.metric(
-        "24h 第一次派送成功率",
-        f"{rate(first_success_hits, len(created_base)):.2%}",
-        f"{first_success_hits}/{len(created_base)}",
-    )
-    if not created_base.empty:
-        render_percentage_pie(
-            "24h 第一次派送成功占比",
-            first_success_hits,
-            len(created_base),
-            hit_label="24h内首次成功",
-            miss_label="超24h或未成功",
-        )
-
     st.markdown("#### 拦截成功率（预留）")
     st.info("预留区域：拦截成功率指标待后续开发。")
+
+    return kpi_payload
 
 
 def _require_db_env() -> None:
@@ -887,7 +975,7 @@ def main() -> None:
     failures: list[dict[str, str]] = st.session_state.get("failures", [])
 
     if result_df is not None:
-        render_kpi_charts(result_df)
+        kpi_payload = render_kpi_charts(result_df)
 
         success_count = len(result_df) - len(failures)
         fail_count = len(failures)
@@ -926,7 +1014,7 @@ def main() -> None:
         except Exception:
             st.warning("当前环境缺少 Excel 依赖，已提供 CSV 下载。")
 
-        c_csv, c_xlsx = st.columns(2)
+        c_csv, c_xlsx, c_report = st.columns(3)
         c_csv.download_button(
             "下载 CSV",
             data=csv_data,
@@ -941,7 +1029,17 @@ def main() -> None:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
+        try:
+            kpi_report_data = kpi_report_to_excel_bytes(kpi_payload)
+            c_report.download_button(
+                "下载数据报表（百分比+图表）",
+                data=kpi_report_data,
+                file_name=f"kpi_report_{stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            c_report.warning("当前环境缺少图表报表依赖，无法导出 KPI 报表。")
+
 
 if __name__ == "__main__":
     main()
-
