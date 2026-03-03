@@ -64,6 +64,9 @@ REGION_BY_STATE = {
     "FL": "EA",
 }
 
+STATE_ALIAS = {
+    "NY": "NJ",
+}
 
 def count_pod_stats(row: dict[str, str] | pd.Series) -> tuple[int, int]:
     pod_count = 0
@@ -418,8 +421,13 @@ def empty_row(tracking_id: str) -> dict[str, str]:
 
 
 def infer_region_from_state(state: str) -> str:
-    normalized_state = str(state or "").strip().upper()
+    normalized_state = normalize_state(state)
     return REGION_BY_STATE.get(normalized_state, "")
+
+
+def normalize_state(state: str) -> str:
+    normalized_state = str(state or "").strip().upper()
+    return STATE_ALIAS.get(normalized_state, normalized_state)
 
 
 def fetch_tracking_data(tracking_id: str, session: requests.Session) -> dict[str, Any]:
@@ -656,7 +664,7 @@ def main() -> None:
                     payload = fetch_tracking_data(tracking_id, session)
                     row = build_row(tracking_id, payload)
                     state = str(receive_province_map.get(tracking_id) or "").strip()
-                    row["State"] = state
+                    row["State"] = normalize_state(state)
                     row["Region"] = infer_region_from_state(state)
                     rows_by_id[tracking_id] = row
                 except requests.HTTPError as e:
@@ -664,14 +672,14 @@ def main() -> None:
                     failures.append({"tracking_id": tracking_id, "reason": f"HTTP {code}"})
                     row = empty_row(tracking_id)
                     state = str(receive_province_map.get(tracking_id) or "").strip()
-                    row["State"] = state
+                    row["State"] = normalize_state(state)
                     row["Region"] = infer_region_from_state(state)
                     rows_by_id[tracking_id] = row
                 except Exception as e:  # noqa: BLE001
                     failures.append({"tracking_id": tracking_id, "reason": str(e)})
                     row = empty_row(tracking_id)
                     state = str(receive_province_map.get(tracking_id) or "").strip()
-                    row["State"] = state
+                    row["State"] = normalize_state(state)
                     row["Region"] = infer_region_from_state(state)
                     rows_by_id[tracking_id] = row
 
@@ -752,4 +760,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
