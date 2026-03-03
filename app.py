@@ -919,8 +919,8 @@ def process_tracking_ids(
 
 
 def main() -> None:
-    st.set_page_config(page_title="Tracking Export", layout="wide")
-    st.title("Tracking Export")
+    st.set_page_config(page_title="fimile美区运单运营数据分析系统", layout="wide")
+    st.title("fimile美区运单运营数据分析系统")
 
     if "dedup_ids" not in st.session_state:
         st.session_state["dedup_ids"] = []
@@ -1091,3 +1091,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
