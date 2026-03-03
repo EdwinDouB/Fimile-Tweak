@@ -980,6 +980,10 @@ def main() -> None:
         st.session_state["failures"] = []
     if "pod_compliance_map" not in st.session_state:
         st.session_state["pod_compliance_map"] = {}
+    if "region_filter" not in st.session_state:
+        st.session_state["region_filter"] = "ALL"
+    if "state_filter" not in st.session_state:
+        st.session_state["state_filter"] = "ALL"
 
     st.subheader("1) 输入 Tracking IDs")
     mode = st.radio("输入方式", ["数据库按日期", "上传文件", "文本粘贴"], horizontal=True)
@@ -1071,7 +1075,48 @@ def main() -> None:
     failures: list[dict[str, str]] = st.session_state.get("failures", [])
 
     if result_df is not None:
-        kpi_payload = render_kpi_charts(result_df)
+        st.subheader("筛选视图")
+
+        region_series = result_df["Region"].fillna("").astype(str).str.strip()
+        region_options = ["ALL"] + sorted([item for item in region_series.unique().tolist() if item])
+
+        if st.session_state["region_filter"] not in region_options:
+            st.session_state["region_filter"] = "ALL"
+
+        selected_region = st.selectbox(
+            "Region",
+            options=region_options,
+            key="region_filter",
+        )
+
+        if selected_region == "ALL":
+            available_states_df = result_df
+        else:
+            available_states_df = result_df[result_df["Region"].fillna("").astype(str).str.strip() == selected_region]
+
+        state_series = available_states_df["State"].fillna("").astype(str).str.strip()
+        state_options = ["ALL"] + sorted([item for item in state_series.unique().tolist() if item])
+
+        if st.session_state["state_filter"] not in state_options:
+            st.session_state["state_filter"] = "ALL"
+
+        selected_state = st.selectbox(
+            "State",
+            options=state_options,
+            key="state_filter",
+        )
+
+        filtered_df = result_df.copy()
+        if selected_region != "ALL":
+            filtered_df = filtered_df[
+                filtered_df["Region"].fillna("").astype(str).str.strip() == selected_region
+            ]
+        if selected_state != "ALL":
+            filtered_df = filtered_df[
+                filtered_df["State"].fillna("").astype(str).str.strip() == selected_state
+            ]
+
+        kpi_payload = render_kpi_charts(filtered_df)
 
         success_count = len(result_df) - len(failures)
         fail_count = len(failures)
@@ -1092,15 +1137,15 @@ def main() -> None:
             )
 
         st.subheader("结果预览")
-        st.dataframe(result_df.head(50), use_container_width=True)
+        st.dataframe(filtered_df.head(50), use_container_width=True)
 
-        delivered_df = result_df[result_df["delivered_time"].astype(str).str.strip() != ""].copy()
+        delivered_df = filtered_df[filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
         if not delivered_df.empty:
             delivered_df["_delivered_dt"] = pd.to_datetime(delivered_df["delivered_time"], errors="coerce")
             delivered_df = delivered_df.sort_values(by=["_delivered_dt", "trakcing_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_data = result_df.to_csv(index=False).encode("utf-8-sig")
+        csv_data = filtered_df.to_csv(index=False).encode("utf-8-sig")
         kpi_report_data = None
         c_csv, c_report = st.columns(2)
         c_csv.download_button(
@@ -1110,7 +1155,7 @@ def main() -> None:
             mime="text/csv",
         )
         try:
-            kpi_report_data = kpi_report_to_excel_bytes(kpi_payload, result_df)
+            kpi_report_data = kpi_report_to_excel_bytes(kpi_payload, filtered_df)
             c_report.download_button(
                 "下载数据报表（百分比+图表）",
                 data=kpi_report_data,
@@ -1126,6 +1171,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
