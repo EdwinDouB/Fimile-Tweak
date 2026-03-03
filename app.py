@@ -730,16 +730,19 @@ def render_kpi_charts(result_df: pd.DataFrame) -> dict[str, Any]:
     st.markdown("#### 月丢包率（First Scan 后无后续轨迹）")
     monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
 
-    lost_condition = (
-        result_df["first_scanned_time"].notna()
-        & (
-            result_df["last_scanned_time"].isna()
-            | (pd.to_datetime(result_df["last_scanned_time"], errors="coerce") <= pd.to_datetime(result_df["first_scanned_time"], errors="coerce"))
-        )
-        & result_df["out_for_delivery_time"].isna()
-        & result_df["attempted_time"].isna()
-        & result_df["delivered_time"].isna()
+    first_scanned_dt = to_datetime_series(result_df, "first_scanned_time")
+    last_scanned_dt = to_datetime_series(result_df, "last_scanned_time")
+    ofd_dt = to_datetime_series(result_df, "out_for_delivery_time")
+    attempted_dt = to_datetime_series(result_df, "attempted_time")
+    delivered_dt = to_datetime_series(result_df, "delivered_time")
+
+    has_followup = (
+        (last_scanned_dt.notna() & (last_scanned_dt > first_scanned_dt))
+        | ofd_dt.notna()
+        | attempted_dt.notna()
+        | delivered_dt.notna()
     )
+    lost_condition = first_scanned_dt.notna() & (~has_followup)
     lost_detail_df = result_df.loc[
         lost_condition,
         [
@@ -1171,6 +1174,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
