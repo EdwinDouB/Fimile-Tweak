@@ -1,8 +1,10 @@
 import io
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+from threading import local
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
@@ -26,6 +28,8 @@ API_URL_TEMPLATE = os.getenv(
 )
 API_TOKEN = os.getenv("KPI_API_TOKEN", "")
 API_TIMEOUT_SECONDS = int(os.getenv("KPI_API_TIMEOUT_SECONDS", "20"))
+API_MAX_WORKERS = max(1, int(os.getenv("KPI_API_MAX_WORKERS", "12")))
+DB_FETCH_BATCH_SIZE = max(100, int(os.getenv("DB_FETCH_BATCH_SIZE", "5000")))
 
 # How many POD images to export per tracking_id (each image can have its own quality.feedback/score)
 POD_IMAGE_EXPORT_N = int(os.getenv("POD_IMAGE_EXPORT_N", "5"))
@@ -434,26 +438,34 @@ def infer_region_from_state(state: str) -> str:
 
 
 
-def fetch_tracking_data(tracking_id: str, session: requests.Session) -> dict[str, Any]:
+def build_api_url(tracking_id: str) -> str:
     if not API_URL_TEMPLATE:
         raise RuntimeError("KPI_API_URL_TEMPLATE 未配置")
 
     if "{tracking_id}" in API_URL_TEMPLATE:
-        url = API_URL_TEMPLATE.format(tracking_id=tracking_id)
-    else:
-        parsed = urlparse(API_URL_TEMPLATE)
-        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-        query["tracking_id"] = tracking_id
-        url = urlunparse(parsed._replace(query=urlencode(query)))
+        return API_URL_TEMPLATE.format(tracking_id=tracking_id)
 
+    parsed = urlparse(API_URL_TEMPLATE)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["tracking_id"] = tracking_id
+    return urlunparse(parsed._replace(query=urlencode(query)))
+
+
+def build_api_headers() -> dict[str, str]:
     headers = {"Accept": "application/json"}
-    if API_TOKEN:
-        token = API_TOKEN.strip()
-        if token.lower().startswith("basic ") or token.lower().startswith("bearer "):
-            headers["Authorization"] = token
-        else:
-            headers["Authorization"] = f"Bearer {token}"
+    if not API_TOKEN:
+        return headers
 
+    token = API_TOKEN.strip()
+    if token.lower().startswith("basic ") or token.lower().startswith("bearer "):
+        headers["Authorization"] = token
+    else:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def fetch_tracking_data(tracking_id: str, session: requests.Session, headers: dict[str, str]) -> dict[str, Any]:
+    url = build_api_url(tracking_id)
     response = session.get(url, headers=headers, timeout=API_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
@@ -776,15 +788,21 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
     try:
         with conn.cursor() as cur:
             sql = """
-                SELECT tracking_number
+                SELECT DISTINCT tracking_number
                 FROM waybill_waybills
                 WHERE created_at >= %s AND created_at <= %s
                 AND tracking_number IS NOT NULL AND tracking_number <> ''
-                ORDER BY created_at ASC
+                ORDER BY tracking_number ASC
             """
             cur.execute(sql, (start_date, end_date))
-            rows = cur.fetchall() or []
-            return [str(r["tracking_number"]).strip() for r in rows if r.get("tracking_number")]
+
+            tracking_numbers: list[str] = []
+            while True:
+                rows = cur.fetchmany(DB_FETCH_BATCH_SIZE)
+                if not rows:
+                    break
+                tracking_numbers.extend(str(r["tracking_number"]).strip() for r in rows if r.get("tracking_number"))
+            return tracking_numbers
     finally:
         conn.close()
 
@@ -832,16 +850,72 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
                     WHERE tracking_number IN ({placeholders})
                 """
                 cur.execute(sql, chunk)
-                rows = cur.fetchall() or []
-                for row in rows:
-                    tracking_number = str(row.get("tracking_number") or "").strip()
-                    if not tracking_number:
-                        continue
-                    receive_province_map[tracking_number] = str(row.get("receive_province") or "").strip()
+                while True:
+                    rows = cur.fetchmany(DB_FETCH_BATCH_SIZE)
+                    if not rows:
+                        break
+                    for row in rows:
+                        tracking_number = str(row.get("tracking_number") or "").strip()
+                        if not tracking_number:
+                            continue
+                        receive_province_map[tracking_number] = str(row.get("receive_province") or "").strip()
     finally:
         conn.close()
 
     return receive_province_map
+
+
+def process_tracking_ids(
+    dedup_ids: list[str],
+    receive_province_map: dict[str, str],
+    progress_bar,
+    status_text,
+) -> tuple[pd.DataFrame, list[dict[str, str]]]:
+    rows_by_id: dict[str, dict[str, str]] = {}
+    failures: list[dict[str, str]] = []
+
+    if not dedup_ids:
+        return pd.DataFrame(columns=OUTPUT_COLUMNS), failures
+
+    total = len(dedup_ids)
+    completed = 0
+    thread_local = local()
+    headers = build_api_headers()
+
+    def worker(tracking_id: str) -> tuple[str, dict[str, str], dict[str, str] | None]:
+        if not hasattr(thread_local, "session"):
+            thread_local.session = requests.Session()
+
+        try:
+            payload = fetch_tracking_data(tracking_id, thread_local.session, headers)
+            row = build_row(tracking_id, payload)
+            return tracking_id, row, None
+        except requests.HTTPError as e:
+            code = e.response.status_code if e.response is not None else "N/A"
+            return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": f"HTTP {code}"}
+        except Exception as e:  # noqa: BLE001
+            return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": str(e)}
+
+    max_workers = min(API_MAX_WORKERS, total)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_tid = {executor.submit(worker, tracking_id): tracking_id for tracking_id in dedup_ids}
+
+        for future in as_completed(future_to_tid):
+            tracking_id, row, failure = future.result()
+            state = str(receive_province_map.get(tracking_id) or "").strip()
+            row["State"] = normalize_state(state)
+            row["Region"] = infer_region_from_state(state)
+            rows_by_id[tracking_id] = row
+
+            if failure:
+                failures.append(failure)
+
+            completed += 1
+            progress_bar.progress(completed / total)
+            status_text.text(f"处理中：{completed}/{total} - {tracking_id}")
+
+    ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
+    return pd.DataFrame(ordered_rows, columns=OUTPUT_COLUMNS), failures
 
 
 def main() -> None:
@@ -914,7 +988,6 @@ def main() -> None:
 
     st.subheader("2) 调用 API 并导出")
     if st.button("Fetch / Export", type="primary", disabled=not dedup_ids):
-        rows_by_id: dict[str, dict[str, str]] = {}
         failures: list[dict[str, str]] = []
         receive_province_map: dict[str, str] = {}
 
@@ -926,37 +999,12 @@ def main() -> None:
         progress = st.progress(0)
         status = st.empty()
 
-        with requests.Session() as session:
-            total = len(dedup_ids)
-            for idx, tracking_id in enumerate(dedup_ids, start=1):
-                status.text(f"处理中：{idx}/{total} - {tracking_id}")
-                try:
-                    payload = fetch_tracking_data(tracking_id, session)
-                    row = build_row(tracking_id, payload)
-                    state = str(receive_province_map.get(tracking_id) or "").strip()
-                    row["State"] = normalize_state(state)
-                    row["Region"] = infer_region_from_state(state)
-                    rows_by_id[tracking_id] = row
-                except requests.HTTPError as e:
-                    code = e.response.status_code if e.response is not None else "N/A"
-                    failures.append({"tracking_id": tracking_id, "reason": f"HTTP {code}"})
-                    row = empty_row(tracking_id)
-                    state = str(receive_province_map.get(tracking_id) or "").strip()
-                    row["State"] = normalize_state(state)
-                    row["Region"] = infer_region_from_state(state)
-                    rows_by_id[tracking_id] = row
-                except Exception as e:  # noqa: BLE001
-                    failures.append({"tracking_id": tracking_id, "reason": str(e)})
-                    row = empty_row(tracking_id)
-                    state = str(receive_province_map.get(tracking_id) or "").strip()
-                    row["State"] = normalize_state(state)
-                    row["Region"] = infer_region_from_state(state)
-                    rows_by_id[tracking_id] = row
-
-                progress.progress(idx / total)
-
-        ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
-        result_df = pd.DataFrame(ordered_rows, columns=OUTPUT_COLUMNS)
+        result_df, failures = process_tracking_ids(
+            dedup_ids=dedup_ids,
+            receive_province_map=receive_province_map,
+            progress_bar=progress,
+            status_text=status,
+        )
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
