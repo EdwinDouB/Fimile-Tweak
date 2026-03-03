@@ -594,35 +594,48 @@ def render_kpi_charts(result_df: pd.DataFrame) -> None:
     st.info("预留区域：月破损率指标待后续开发。")
 
     st.markdown("#### 24小时首次尝试派送率")
-    ofd_base["first_attempt_within_24h"] = (
-        ((ofd_base["attempted_dt"] - ofd_base["created_dt"]).dt.total_seconds() / 3600 <= 24)
-        | ((ofd_base["delivered_dt"] - ofd_base["created_dt"]).dt.total_seconds() / 3600 <= 24)
-    ) & ofd_base["created_dt"].notna()
-    first_attempt_hits = int(ofd_base["first_attempt_within_24h"].fillna(False).sum())
-    st.metric("24h 首次尝试派送率", f"{rate(first_attempt_hits, len(ofd_base)):.2%}", f"{first_attempt_hits}/{len(ofd_base)}")
-    if not ofd_base.empty:
+    created_base = df[df["created_dt"].notna()].copy()
+
+    attempt_hours = (created_base["attempted_dt"] - created_base["created_dt"]).dt.total_seconds() / 3600
+    delivered_hours = (created_base["delivered_dt"] - created_base["created_dt"]).dt.total_seconds() / 3600
+
+    created_base["first_attempt_within_24h"] = (
+        (created_base["attempted_dt"].notna() & (attempt_hours >= 0) & (attempt_hours <= 24))
+        | (created_base["delivered_dt"].notna() & (delivered_hours >= 0) & (delivered_hours <= 24))
+    )
+    first_attempt_hits = int(created_base["first_attempt_within_24h"].fillna(False).sum())
+    st.metric(
+        "24h 首次尝试派送率",
+        f"{rate(first_attempt_hits, len(created_base)):.2%}",
+        f"{first_attempt_hits}/{len(created_base)}",
+    )
+    if not created_base.empty:
         render_percentage_pie(
             "24h 首次尝试派送占比",
             first_attempt_hits,
-            len(ofd_base),
+            len(created_base),
             hit_label="24h内首次尝试",
             miss_label="超24h或未尝试",
         )
 
     st.markdown("#### 24小时第一次派送成功率")
-    ofd_base["first_success_within_24h"] = (
-        ofd_base["attempted_dt"].isna()
-        & ofd_base["delivered_dt"].notna()
-        & (((ofd_base["delivered_dt"] - ofd_base["created_dt"]).dt.total_seconds() / 3600) <= 24)
-        & ofd_base["created_dt"].notna()
+    created_base["first_success_within_24h"] = (
+        created_base["attempted_dt"].isna()
+        & created_base["delivered_dt"].notna()
+        & (delivered_hours >= 0)
+        & (delivered_hours <= 24)
     )
-    first_success_hits = int(ofd_base["first_success_within_24h"].fillna(False).sum())
-    st.metric("24h 第一次派送成功率", f"{rate(first_success_hits, len(ofd_base)):.2%}", f"{first_success_hits}/{len(ofd_base)}")
-    if not ofd_base.empty:
+    first_success_hits = int(created_base["first_success_within_24h"].fillna(False).sum())
+    st.metric(
+        "24h 第一次派送成功率",
+        f"{rate(first_success_hits, len(created_base)):.2%}",
+        f"{first_success_hits}/{len(created_base)}",
+    )
+    if not created_base.empty:
         render_percentage_pie(
             "24h 第一次派送成功占比",
             first_success_hits,
-            len(ofd_base),
+            len(created_base),
             hit_label="24h内首次成功",
             miss_label="超24h或未成功",
         )
@@ -931,3 +944,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
