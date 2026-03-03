@@ -509,9 +509,14 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
     candidate_mask_base = ~has_event_within_72h
 
     if fetch_reference_time is None:
-        fetch_reference_time = datetime.now()
+        fetch_reference_time_utc = datetime.now(timezone.utc)
+    elif fetch_reference_time.tzinfo is None:
+        fetch_reference_time_utc = fetch_reference_time.replace(tzinfo=timezone.utc)
+    else:
+        fetch_reference_time_utc = fetch_reference_time.astimezone(timezone.utc)
 
-    last_scan_age_hours = (fetch_reference_time - scanned_base["last_scanned_dt"]).dt.total_seconds() / 3600
+    last_scanned_utc = pd.to_datetime(scanned_base["last_scanned_dt"], errors="coerce", utc=True)
+    last_scan_age_hours = (fetch_reference_time_utc - last_scanned_utc).dt.total_seconds() / 3600
     immature_mask_base = last_scan_age_hours < 72
 
     lost_mask_base = candidate_mask_base & (~immature_mask_base)
@@ -1228,5 +1233,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
