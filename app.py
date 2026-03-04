@@ -49,10 +49,9 @@ OUTPUT_COLUMNS = [
     "last_scanned_time",
     "out_for_delivery_time",
     "attempted_time",
-    "out_for_delivery_time",
-    "attempted_time",
-    "CS_time",
     "failed_route",
+    "delivered_time",
+    "success_route",
     *POD_COLUMNS,
     "创建到入库时间",
     "库内停留时间",
@@ -371,17 +370,12 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     ofd_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"out-for-delivery", "ofd", "outfordelivery"})
     fail_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
     success_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
-    customer_service_evt = first_event_by_predicate(
-        events,
-        lambda e: "customer service" in str(e.get("description") or "").strip().lower(),
-    )
 
     created_time = to_local_dt(event_ts(created_evt) if created_evt else None)
     first_scanned_time = to_local_dt(event_ts(first_scanned_evt) if first_scanned_evt else None)
     last_scanned_time = to_local_dt(event_ts(last_scanned_evt) if last_scanned_evt else None)
     out_for_delivery_time = to_local_dt(event_ts(ofd_evt) if ofd_evt else None)
     attempted_time = to_local_dt(event_ts(fail_evt) if fail_evt else None)
-    cs_time = to_local_dt(event_ts(customer_service_evt) if customer_service_evt else None)
     delivered_time = to_local_dt(event_ts(success_evt) if success_evt else None)
 
     row: dict[str, str] = {
@@ -399,10 +393,9 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "last_scanned_time": fmt_dt(last_scanned_time),
         "out_for_delivery_time": fmt_dt(out_for_delivery_time),
         "attempted_time": fmt_dt(attempted_time),
-        "out_for_delivery_time": fmt_dt(out_for_delivery_time),
-        "attempted_time": fmt_dt(attempted_time),
-        "CS_time": fmt_dt(cs_time),
         "failed_route": parse_route(fail_evt.get("description")) if fail_evt else "",
+        "delivered_time": fmt_dt(delivered_time),
+        "success_route": parse_route(success_evt.get("description")) if success_evt else "",
         "创建到入库时间": diff_hours(first_scanned_time, created_time),
         "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
         "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
@@ -496,7 +489,6 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
             "lost_mask": pd.Series(False, index=df.index),
             "candidate_mask": pd.Series(False, index=df.index),
             "immature_mask": pd.Series(False, index=df.index),
-            "cs_mask": pd.Series(False, index=df.index),
         }
 
     time_window_end = scanned_base["last_scanned_dt"] + pd.Timedelta(hours=72)
@@ -526,9 +518,8 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
     last_scanned_utc = pd.to_datetime(scanned_base["last_scanned_dt"], errors="coerce", utc=True)
     last_scan_age_hours = (fetch_reference_time_utc - last_scanned_utc).dt.total_seconds() / 3600
     immature_mask_base = last_scan_age_hours < 72
-    cs_mask_base = scanned_base["cs_dt"].notna() if "cs_dt" in scanned_base.columns else pd.Series(False, index=scanned_base.index)
 
-    lost_mask_base = candidate_mask_base & (~immature_mask_base) & (~cs_mask_base)
+    lost_mask_base = candidate_mask_base & (~immature_mask_base)
 
     candidate_mask = pd.Series(False, index=df.index)
     candidate_mask.loc[scanned_base.index] = candidate_mask_base.to_numpy()
@@ -539,15 +530,11 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
     lost_mask = pd.Series(False, index=df.index)
     lost_mask.loc[scanned_base.index] = lost_mask_base.to_numpy()
 
-    cs_mask = pd.Series(False, index=df.index)
-    cs_mask.loc[scanned_base.index] = cs_mask_base.to_numpy()
-
     return {
         "scanned_base": scanned_base,
         "lost_mask": lost_mask,
         "candidate_mask": candidate_mask,
         "immature_mask": immature_mask,
-        "cs_mask": cs_mask,
     }
 
 def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
@@ -557,7 +544,6 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
     df["last_scanned_dt"] = to_datetime_series(df, "last_scanned_time")
     df["ofd_dt"] = to_datetime_series(df, "out_for_delivery_time")
     df["attempted_dt"] = to_datetime_series(df, "attempted_time")
-    df["cs_dt"] = to_datetime_series(df, "CS_time")
     df["delivered_dt"] = to_datetime_series(df, "delivered_time")
     df["month"] = df["created_dt"].dt.to_period("M").astype(str)
     df.loc[df["month"] == "NaT", "month"] = "未知"
@@ -706,16 +692,7 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFra
 def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.Series(pd.NaT, index=df.index)
-
-    series_or_df = df.loc[:, column]
-    if isinstance(series_or_df, pd.DataFrame):
-        # Upstream merges can occasionally introduce duplicate column names.
-        # For KPI calculations we only need one datetime value per row, so
-        # collapse duplicate columns by taking the first non-null value.
-        series_or_df = series_or_df.bfill(axis=1).iloc[:, 0]
-
-    return pd.to_datetime(series_or_df, errors="coerce")
-
+    return pd.to_datetime(df[column], errors="coerce")
 
 
 def rate(numerator: int, denominator: int) -> float:
@@ -810,7 +787,6 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
     last_scanned_dt = to_datetime_series(result_df, "last_scanned_time")
     ofd_dt = to_datetime_series(result_df, "out_for_delivery_time")
     attempted_dt = to_datetime_series(result_df, "attempted_time")
-    cs_dt = to_datetime_series(result_df, "CS_time")
     delivered_dt = to_datetime_series(result_df, "delivered_time")
 
     analysis_df = result_df.copy()
@@ -818,12 +794,10 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
     analysis_df["last_scanned_dt"] = last_scanned_dt
     analysis_df["ofd_dt"] = ofd_dt
     analysis_df["attempted_dt"] = attempted_dt
-    analysis_df["cs_dt"] = cs_dt
     analysis_df["delivered_dt"] = delivered_dt
 
     lost_analysis = build_lost_package_analysis(analysis_df, fetch_reference_time=fetch_reference_time)
     lost_condition = lost_analysis["lost_mask"]
-    cs_condition = lost_analysis["cs_mask"]
 
     lost_detail_df = result_df.loc[
         lost_condition,
@@ -837,24 +811,6 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             "last_scanned_time",
             "out_for_delivery_time",
             "attempted_time",
-            "CS_time",
-            "delivered_time",
-        ],
-    ].copy()
-
-    cs_detail_df = result_df.loc[
-        cs_condition,
-        [
-            "trakcing_id",
-            "Region",
-            "State",
-            "shipperName",
-            "created_time",
-            "first_scanned_time",
-            "last_scanned_time",
-            "out_for_delivery_time",
-            "attempted_time",
-            "CS_time",
             "delivered_time",
         ],
     ].copy()
@@ -882,12 +838,6 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             st.info("当前无符合丢包条件的运单。")
         else:
             st.dataframe(lost_detail_df, use_container_width=True)
-
-        st.markdown("##### 客服件明细（有 CS_time，不计入丢包）")
-        if cs_detail_df.empty:
-            st.info("当前无客服件。")
-        else:
-            st.dataframe(cs_detail_df, use_container_width=True)
     else:
         st.info("没有 Last Scan 数据，无法计算月丢包率。")
 
@@ -1078,11 +1028,6 @@ def main() -> None:
     st.set_page_config(page_title="Fimile美区运单运营数据分析系统", layout="wide")
     st.title("fimile美区运单运营数据分析系统")
     st.caption(f"版本号：{APP_VERSION}")
-    now_utc = datetime.now(timezone.utc)
-    st.info(
-        f"丢包判定当前时间（UTC）：{now_utc.strftime('%Y-%m-%d %H:%M:%S')} | "
-        f"72 小时前（UTC）：{(now_utc - timedelta(hours=72)).strftime('%Y-%m-%d %H:%M:%S')}"
-    )
 
     if "dedup_ids" not in st.session_state:
         st.session_state["dedup_ids"] = []
@@ -1156,7 +1101,7 @@ def main() -> None:
 
     st.subheader("2) 调用 API 并导出")
     if st.button("Fetch / Export", type="primary", disabled=not dedup_ids):
-        st.session_state["fetch_clicked_at"] = datetime.now(timezone.utc)
+        st.session_state["fetch_clicked_at"] = datetime.now()
         failures: list[dict[str, str]] = []
         receive_province_map: dict[str, str] = {}
 
@@ -1288,10 +1233,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
 
 
