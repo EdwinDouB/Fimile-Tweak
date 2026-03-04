@@ -44,6 +44,7 @@ OUTPUT_COLUMNS = [
     "Region",
     "State",
     "shipperName",
+    "has_customer_service",
     "created_time",
     "first_scanned_time",
     "last_scanned_time",
@@ -355,9 +356,26 @@ def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) ->
     return []
 
 
+def event_description(event: dict[str, Any]) -> str:
+    for container in (event, event.get("logItem"), event.get("log")):
+        if isinstance(container, dict):
+            desc = container.get("description")
+            if desc:
+                return str(desc)
+    return ""
+
+
+def has_customer_service_record(events: list[dict[str, Any]]) -> bool:
+    for event in events:
+        if "customer service" in event_description(event).lower():
+            return True
+    return False
+
+
 def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     events = normalize_events(payload)
     shipper_name = extract_shipper_name_from_events(events)
+    customer_service_hit = has_customer_service_record(events)
 
     created_evt = first_event_by_predicate(events, lambda e: event_type(e) == "label")
     scanned_predicate = lambda e: (
@@ -388,6 +406,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
             or payload.get("response", {}).get("shipperName")
             or ""
         ),
+        "has_customer_service": "1" if customer_service_hit else "0",
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
         "last_scanned_time": fmt_dt(last_scanned_time),
@@ -519,7 +538,17 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
     last_scan_age_hours = (fetch_reference_time_utc - last_scanned_utc).dt.total_seconds() / 3600
     immature_mask_base = last_scan_age_hours < 120
 
-    lost_mask_base = candidate_mask_base & (~immature_mask_base)
+    customer_service_mask_base = pd.Series(False, index=scanned_base.index)
+    if "has_customer_service" in scanned_base.columns:
+        customer_service_mask_base = (
+            scanned_base["has_customer_service"]
+            .astype(str)
+            .str.strip()
+            .str.lower()
+            .isin({"1", "true", "yes", "y"})
+        )
+
+    lost_mask_base = candidate_mask_base & (~immature_mask_base) & (~customer_service_mask_base)
 
     candidate_mask = pd.Series(False, index=df.index)
     candidate_mask.loc[scanned_base.index] = candidate_mask_base.to_numpy()
@@ -1239,6 +1268,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
