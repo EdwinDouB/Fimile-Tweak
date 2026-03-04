@@ -1,6 +1,8 @@
 import io
+import json
 import os
 import re
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
@@ -30,6 +32,7 @@ API_TOKEN = os.getenv("KPI_API_TOKEN", "")
 API_TIMEOUT_SECONDS = int(os.getenv("KPI_API_TIMEOUT_SECONDS", "20"))
 API_MAX_WORKERS = max(1, int(os.getenv("KPI_API_MAX_WORKERS", "12")))
 DB_FETCH_BATCH_SIZE = max(100, int(os.getenv("DB_FETCH_BATCH_SIZE", "5000")))
+ROUTES_REPORT_BASE_URL = os.getenv("ROUTES_REPORT_BASE_URL", "https://isp.beans.ai")
 
 # How many POD images to export per tracking_id (each image can have its own quality.feedback/score)
 POD_IMAGE_EXPORT_N = int(os.getenv("POD_IMAGE_EXPORT_N", "5"))
@@ -489,6 +492,67 @@ def fetch_tracking_data(tracking_id: str, session: requests.Session, headers: di
     response = session.get(url, headers=headers, timeout=API_TIMEOUT_SECONDS)
     response.raise_for_status()
     return response.json()
+
+
+def fetch_routes_report_via_curl(
+    base_url: str,
+    date_from: str,
+    date_to: str,
+    route_name: str = "",
+    address: str = "",
+    package_number: str = "",
+    assignee_name: str = "",
+    route_payload_text: str = "",
+) -> dict[str, Any]:
+    query_pairs: list[tuple[str, str]] = [("date_from", date_from), ("date_to", date_to)]
+    optional_filters = {
+        "route_name": route_name,
+        "address": address,
+        "package_number": package_number,
+        "assignee_name": assignee_name,
+    }
+    for key, value in optional_filters.items():
+        value_text = str(value or "").strip()
+        if value_text:
+            query_pairs.append((key, value_text))
+
+    query = urlencode(query_pairs)
+    report_url = f"{base_url.rstrip('/')}/enterprise/v1/lists/items/do/report?{query}"
+
+    payload_text = route_payload_text.strip()
+    payload_obj: dict[str, Any] = {}
+    if payload_text:
+        payload_obj = json.loads(payload_text)
+
+    cmd = [
+        "curl",
+        "--silent",
+        "--show-error",
+        "--location",
+        "--request",
+        "GET",
+        report_url,
+        "--header",
+        "Accept: application/json",
+        "--header",
+        "Content-Type: application/json",
+    ]
+    if API_TOKEN:
+        token = API_TOKEN.strip()
+        if token.lower().startswith("basic ") or token.lower().startswith("bearer "):
+            auth_header = f"Authorization: {token}"
+        else:
+            auth_header = f"Authorization: Bearer {token}"
+        cmd.extend(["--header", auth_header])
+
+    cmd.extend(["--data-raw", json.dumps(payload_obj, ensure_ascii=False)])
+
+    completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        raise RuntimeError(completed.stderr.strip() or "curl 调用失败")
+
+    body = completed.stdout.strip() or "{}"
+    return json.loads(body)
 
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -1064,6 +1128,75 @@ def main() -> None:
     st.title("fimile美区运单运营数据分析系统")
     st.caption(f"版本号：{APP_VERSION}")
 
+    st.subheader("Routes Report 快捷下载")
+    with st.expander("通过 curl 获取 Routes Report", expanded=False):
+        rb1, rb2 = st.columns(2)
+        with rb1:
+            report_date_from = st.date_input("date_from", value=date.today() - timedelta(days=7), key="report_date_from")
+        with rb2:
+            report_date_to = st.date_input("date_to", value=date.today(), key="report_date_to")
+
+        rf1, rf2 = st.columns(2)
+        with rf1:
+            report_route_name = st.text_input("route_name (optional)", key="report_route_name")
+            report_address = st.text_input("address (optional)", key="report_address")
+        with rf2:
+            report_package_number = st.text_input("package_number (optional)", key="report_package_number")
+            report_assignee_name = st.text_input("assignee_name (optional)", key="report_assignee_name")
+
+        default_route_payload = """{
+  "route": [
+    {"list_route_id": "e4630dbb-44f9-447c-8c5d-ba7482e0a6b82-k1"},
+    {"list_route_id": "ecdd0458-7e63-44ad-b26d-b89fded637a2-k1"}
+  ]
+}"""
+        report_route_payload = st.text_area(
+            "Body payload JSON (optional)",
+            value=default_route_payload,
+            height=120,
+            key="report_route_payload",
+        )
+
+        requested_reports = st.session_state.get("routes_reports", [])
+        b_csv, b_pdf, b_xls = st.columns(3)
+        with b_csv:
+            req_csv = st.button("请求报告 (CSV)", use_container_width=True)
+        with b_pdf:
+            req_pdf = st.button("请求报告 (PDF)", use_container_width=True)
+        with b_xls:
+            req_xls = st.button("请求报告 (XLS)", use_container_width=True)
+
+        if req_csv or req_pdf or req_xls:
+            try:
+                payload = fetch_routes_report_via_curl(
+                    base_url=ROUTES_REPORT_BASE_URL,
+                    date_from=report_date_from.strftime("%Y-%m-%d"),
+                    date_to=report_date_to.strftime("%Y-%m-%d"),
+                    route_name=report_route_name,
+                    address=report_address,
+                    package_number=report_package_number,
+                    assignee_name=report_assignee_name,
+                    route_payload_text=report_route_payload,
+                )
+                requested_reports = payload.get("reports", []) if isinstance(payload, dict) else []
+                st.session_state["routes_reports"] = requested_reports
+                if not requested_reports:
+                    st.warning("请求成功，但未返回 reports。")
+            except Exception as e:
+                st.error(f"获取报告失败：{e}")
+
+        if requested_reports:
+            st.success(f"共返回 {len(requested_reports)} 个报告")
+            for idx, report in enumerate(requested_reports, start=1):
+                row = st.columns(4)
+                row[0].markdown(f"**报告 {idx}**")
+                csv_url = str(report.get("csvUrl") or "").strip()
+                pdf_url = str(report.get("pdfUrl") or "").strip()
+                xls_url = str(report.get("xlsUrl") or "").strip()
+                row[1].markdown(f"[CSV 下载]({csv_url})" if csv_url else "CSV: -")
+                row[2].markdown(f"[PDF 下载]({pdf_url})" if pdf_url else "PDF: -")
+                row[3].markdown(f"[XLS 下载]({xls_url})" if xls_url else "XLS: -")
+
     if "dedup_ids" not in st.session_state:
         st.session_state["dedup_ids"] = []
     if "db_raw_ids" not in st.session_state:
@@ -1080,6 +1213,8 @@ def main() -> None:
         st.session_state["state_filter"] = "ALL"
     if "fetch_clicked_at" not in st.session_state:
         st.session_state["fetch_clicked_at"] = None
+    if "routes_reports" not in st.session_state:
+        st.session_state["routes_reports"] = []
 
     st.subheader("1) 输入 Tracking IDs")
     mode = st.radio("输入方式", ["数据库按日期", "上传文件", "文本粘贴"], horizontal=True)
