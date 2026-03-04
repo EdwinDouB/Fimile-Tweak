@@ -549,7 +549,6 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
         "immature_mask": immature_mask,
         "cs_mask": cs_mask,
     }
-}
 
 def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     df = result_df.copy()
@@ -1280,6 +1279,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
