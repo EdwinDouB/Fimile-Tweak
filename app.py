@@ -14,12 +14,28 @@ import pandas as pd
 import requests
 import streamlit as st
 
+
+def read_config(name: str, default: str = "") -> str:
+    """Read config from env first, then Streamlit secrets."""
+    value = os.getenv(name)
+    if value not in (None, ""):
+        return value
+
+    try:
+        secret_value = st.secrets.get(name)
+    except Exception:
+        secret_value = None
+
+    if secret_value in (None, ""):
+        return default
+    return str(secret_value)
+
 # ---- MySQL (read from env; DO NOT hardcode secrets) ----
-MYSQL_HOST = os.getenv("MYSQL_HOST", "")
-MYSQL_PORT = int(os.getenv("MYSQL_PORT", "3306"))
-MYSQL_USERNAME = os.getenv("MYSQL_USERNAME", "")
-MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
-MYSQL_DATABASE = os.getenv("MYSQL_DATABASE", "")
+MYSQL_HOST = read_config("MYSQL_HOST", "")
+MYSQL_PORT = int(read_config("MYSQL_PORT", "3306"))
+MYSQL_USERNAME = read_config("MYSQL_USERNAME", "")
+MYSQL_PASSWORD = read_config("MYSQL_PASSWORD", "")
+MYSQL_DATABASE = read_config("MYSQL_DATABASE", "")
 
 # API configuration comes from code/env only (not exposed in UI).
 API_URL_TEMPLATE = os.getenv(
@@ -28,15 +44,18 @@ API_URL_TEMPLATE = os.getenv(
     "?tracking_id={tracking_id}&readable=true"
     "&include_pod=true&include_item=true",
 )
-API_TOKEN = os.getenv("KPI_API_TOKEN", "")
-API_TIMEOUT_SECONDS = int(os.getenv("KPI_API_TIMEOUT_SECONDS", "20"))
-API_MAX_WORKERS = max(1, int(os.getenv("KPI_API_MAX_WORKERS", "12")))
-DB_FETCH_BATCH_SIZE = max(100, int(os.getenv("DB_FETCH_BATCH_SIZE", "5000")))
-ROUTES_REPORT_BASE_URL = os.getenv("ROUTES_REPORT_BASE_URL", "https://isp.beans.ai")
+API_URL_TEMPLATE = read_config("KPI_API_URL_TEMPLATE", API_URL_TEMPLATE)
+API_TOKEN = read_config("KPI_API_TOKEN", "")
+API_TIMEOUT_SECONDS = int(read_config("KPI_API_TIMEOUT_SECONDS", "20"))
+API_MAX_WORKERS = max(1, int(read_config("KPI_API_MAX_WORKERS", "12")))
+DB_FETCH_BATCH_SIZE = max(100, int(read_config("DB_FETCH_BATCH_SIZE", "5000")))
+ROUTES_REPORT_BASE_URL = read_config("ROUTES_REPORT_BASE_URL", "https://isp.beans.ai")
+ROUTES_REPORT_TOKEN = read_config("ROUTES_REPORT_TOKEN", API_TOKEN)
 
 # How many POD images to export per tracking_id (each image can have its own quality.feedback/score)
 POD_IMAGE_EXPORT_N = int(os.getenv("POD_IMAGE_EXPORT_N", "5"))
-APP_VERSION = os.getenv("APP_VERSION", "a0.0.4")
+POD_IMAGE_EXPORT_N = int(read_config("POD_IMAGE_EXPORT_N", str(POD_IMAGE_EXPORT_N)))
+APP_VERSION = read_config("APP_VERSION", "a0.0.5")
 
 POD_COLUMNS: list[str] = []
 for i in range(1, POD_IMAGE_EXPORT_N + 1):
@@ -530,19 +549,19 @@ def fetch_routes_report_via_curl(
         "--show-error",
         "--location",
         "--request",
-        "GET",
+        "POST",
         report_url,
         "--header",
         "Accept: application/json",
         "--header",
         "Content-Type: application/json",
     ]
-    if API_TOKEN:
-        token = API_TOKEN.strip()
+    if ROUTES_REPORT_TOKEN:
+        token = ROUTES_REPORT_TOKEN.strip()
         if token.lower().startswith("basic ") or token.lower().startswith("bearer "):
             auth_header = f"Authorization: {token}"
         else:
-            auth_header = f"Authorization: Bearer {token}"
+            auth_header = f"Authorization: Basic {token}"
         cmd.extend(["--header", auth_header])
 
     cmd.extend(["--data-raw", json.dumps(payload_obj, ensure_ascii=False)])
@@ -1403,6 +1422,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
