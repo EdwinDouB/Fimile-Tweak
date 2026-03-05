@@ -1020,6 +1020,64 @@ def render_percentage_pie(
     )
 
 
+def normalize_region(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if text in {"WE", "WEST", "W", "美西"}:
+        return "WE"
+    if text in {"EA", "EAST", "E", "美东"}:
+        return "EA"
+    return ""
+
+
+def _append_delivery_breakdown_rows(
+    rows: list[dict[str, Any]],
+    scope_name: str,
+    source_df: pd.DataFrame,
+    thresholds: list[int],
+) -> None:
+    total_count = len(source_df)
+    row: dict[str, Any] = {"维度": scope_name, "样本数": total_count}
+    for threshold in thresholds:
+        hit_col = f"within_{threshold}h"
+        hit_count = int(source_df[hit_col].sum()) if hit_col in source_df.columns else 0
+        row[f"<{threshold}h命中"] = hit_count
+        row[f"<{threshold}h妥投率"] = rate(hit_count, total_count)
+    rows.append(row)
+
+
+def build_delivery_breakdown_table(delivered_detail_df: pd.DataFrame, thresholds: list[int]) -> pd.DataFrame:
+    if delivered_detail_df.empty:
+        return pd.DataFrame(columns=["维度", "样本数"])
+
+    source_df = delivered_detail_df.copy()
+    source_df["region_norm"] = source_df["Region"].apply(normalize_region)
+
+    rows: list[dict[str, Any]] = []
+    _append_delivery_breakdown_rows(rows, "总体", source_df, thresholds)
+
+    for region_code, region_name in [("WE", "美西"), ("EA", "美东")]:
+        region_df = source_df[source_df["region_norm"] == region_code]
+        _append_delivery_breakdown_rows(rows, region_name, region_df, thresholds)
+        if region_df.empty:
+            continue
+
+        for hub_name in sorted(region_df["Hub"].fillna("未知Hub").astype(str).str.strip().replace("", "未知Hub").unique()):
+            hub_df = region_df[region_df["Hub"].fillna("未知Hub").astype(str).str.strip().replace("", "未知Hub") == hub_name]
+            _append_delivery_breakdown_rows(rows, f"  {hub_name}", hub_df, thresholds)
+
+            contractor_series = hub_df["Contractor"].fillna("未知Contractor").astype(str).str.strip().replace("", "未知Contractor")
+            for contractor_name in sorted(contractor_series.unique()):
+                contractor_df = hub_df[contractor_series == contractor_name]
+                _append_delivery_breakdown_rows(rows, f"    {contractor_name}", contractor_df, thresholds)
+
+    table_df = pd.DataFrame(rows)
+    percent_cols = [f"<{threshold}h妥投率" for threshold in thresholds]
+    for col in percent_cols:
+        if col in table_df.columns:
+            table_df[col] = table_df[col].map(lambda x: f"{x:.2%}")
+    return table_df
+
+
 def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("指标") == "<24h 妥投率"), None)
     scan_24h = next((m for m in kpi_payload["metrics"] if m.get("指标") == "<24h 上网率"), None)
@@ -1082,11 +1140,6 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
-    if layout_mode == "compact":
-        render_compact_kpi_row(kpi_payload)
-        return kpi_payload
-
-    st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
     delivered_detail_df = result_df.loc[
         result_df["out_for_delivery_time"].notna() & result_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
         [
@@ -1094,6 +1147,8 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
             "Region",
             "State",
             "shipperName",
+            "Hub",
+            "Contractor",
             "out_for_delivery_time",
             "delivered_time",
         ],
@@ -1109,6 +1164,15 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
             & (delivered_detail_df["ofd_to_delivered_hours"] >= 0)
             & (delivered_detail_df["ofd_to_delivered_hours"] < threshold)
         )
+
+    if layout_mode == "compact":
+        render_compact_kpi_row(kpi_payload)
+        st.markdown("##### 24小时妥投率明细")
+        st.dataframe(build_delivery_breakdown_table(delivered_detail_df, thresholds=[24]), use_container_width=True)
+        return kpi_payload
+
+    st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
+    st.dataframe(build_delivery_breakdown_table(delivered_detail_df, thresholds=[24, 48, 72]), use_container_width=True)
     delivered_detail_df = delivered_detail_df.drop(columns=["ofd_dt", "delivered_dt"])
 
     delivered_header_cols = st.columns([4, 1])
@@ -1763,6 +1827,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
