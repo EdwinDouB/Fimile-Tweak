@@ -57,14 +57,17 @@ POD_COLUMNS: list[str] = []
 for i in range(1, POD_IMAGE_EXPORT_N + 1):
     POD_COLUMNS += [f"pod_feedback_{i}", f"pod_score_{i}"]
 
+EXPORT_EXCLUDED_COLUMNS = set(POD_COLUMNS)
+
 OUTPUT_COLUMNS = [
     "trakcing_id",
     "Region",
     "State",
     "shipperName",
     "Driver",
-    "Warehouse",
+    "Hub",
     "Contractor",
+    "Route_name",
     "has_customer_service",
     "created_time",
     "first_scanned_time",
@@ -74,7 +77,6 @@ OUTPUT_COLUMNS = [
     "failed_route",
     "delivered_time",
     "success_route",
-    *POD_COLUMNS,
     "创建到入库时间",
     "库内停留时间",
     "尝试配送时间",
@@ -100,7 +102,7 @@ I18N = {
         "language_label": "语言 / Language",
         "app_title": "Fimile美区运单运营数据分析系统",
         "version": "版本号：{version}",
-        "route_info": "Driver / Warehouse / Contractor 将从 Route Name 自动解析：HUB-路区号-日期-DSP-司机名",
+        "route_info": "Driver / Hub / Contractor 将从 Route Name 自动解析：HUB-路区号-日期-DSP-司机名",
         "input_section": "1) 输入 Tracking IDs",
         "input_mode": "输入方式",
         "mode_db": "数据库按日期",
@@ -121,6 +123,8 @@ I18N = {
         "processing": "处理中：{completed}/{total} - {tracking_id}",
         "done": "处理完成",
         "filter_view": "筛选视图",
+        "invalid_route_section": "Route_name 不符合标准",
+        "invalid_route_empty": "全部 Route_name 均符合标准。",
         "ofd_filter_start": "出库配送时间起始日期 (Out for Delivery)",
         "ofd_filter_end": "出库配送时间结束日期 (Out for Delivery)",
         "all": "ALL",
@@ -153,7 +157,7 @@ I18N = {
         "language_label": "语言 / Language",
         "app_title": "Fimile US Shipment Operations Dashboard",
         "version": "Version: {version}",
-        "route_info": "Driver / Warehouse / Contractor are auto-parsed from Route Name: HUB-Route-Date-DSP-Driver",
+        "route_info": "Driver / Hub / Contractor are auto-parsed from Route Name: HUB-Route-Date-DSP-Driver",
         "input_section": "1) Input Tracking IDs",
         "input_mode": "Input Method",
         "mode_db": "Database by Date",
@@ -174,6 +178,8 @@ I18N = {
         "processing": "Processing: {completed}/{total} - {tracking_id}",
         "done": "Completed",
         "filter_view": "Filter View",
+        "invalid_route_section": "Invalid Route_name",
+        "invalid_route_empty": "All Route_name values are compliant.",
         "ofd_filter_start": "Out for Delivery Start Date",
         "ofd_filter_end": "Out for Delivery End Date",
         "all": "ALL",
@@ -342,14 +348,14 @@ def parse_route_identity(route_name: str) -> dict[str, str]:
     """Parse route format: HUB-路区号-日期-DSP-司机名"""
     text = str(route_name or "").strip()
     if not text:
-        return {"Warehouse": "", "Contractor": "", "Driver": ""}
+        return {"Hub": "", "Contractor": "", "Driver": ""}
 
     match = re.match(r"^([^-]+)-([^-]+)-([^-]+)-([^-]+)-(.+)$", text)
     if not match:
-        return {"Warehouse": "", "Contractor": "", "Driver": ""}
+        return {"Hub": "", "Contractor": "", "Driver": ""}
 
     return {
-        "Warehouse": match.group(1).strip(),
+        "Hub": match.group(1).strip(),
         "Contractor": match.group(4).strip(),
         "Driver": match.group(5).strip(),
     }
@@ -568,6 +574,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "failed_route": parse_route(fail_evt.get("description")) if fail_evt else "",
         "delivered_time": fmt_dt(delivered_time),
         "success_route": parse_route(success_evt.get("description")) if success_evt else "",
+        "Route_name": "",
         "创建到入库时间": diff_hours(first_scanned_time, created_time),
         "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
         "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
@@ -651,10 +658,17 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
     for idx, row in df.iterrows():
         route_name = str(row.get("success_route") or row.get("failed_route") or "").strip()
         route_info = parse_route_identity(route_name)
+        df.at[idx, "Route_name"] = route_name
         df.at[idx, "Driver"] = route_info["Driver"]
-        df.at[idx, "Warehouse"] = route_info["Warehouse"]
+        df.at[idx, "Hub"] = route_info["Hub"]
         df.at[idx, "Contractor"] = route_info["Contractor"]
     return df
+
+
+def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    return df[[col for col in df.columns if col not in EXPORT_EXCLUDED_COLUMNS]].copy()
 
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -1314,6 +1328,12 @@ def main() -> None:
         st.session_state["region_filter"] = "ALL"
     if "state_filter" not in st.session_state:
         st.session_state["state_filter"] = "ALL"
+    if "driver_filter" not in st.session_state:
+        st.session_state["driver_filter"] = "ALL"
+    if "hub_filter" not in st.session_state:
+        st.session_state["hub_filter"] = "ALL"
+    if "contractor_filter" not in st.session_state:
+        st.session_state["contractor_filter"] = "ALL"
     if "fetch_clicked_at" not in st.session_state:
         st.session_state["fetch_clicked_at"] = None
     if "language" not in st.session_state:
@@ -1454,6 +1474,24 @@ def main() -> None:
             key="state_filter",
         )
 
+        driver_series = result_df["Driver"].fillna("").astype(str).str.strip()
+        driver_options = [tr("all")] + sorted([item for item in driver_series.unique().tolist() if item])
+        if st.session_state["driver_filter"] not in driver_options:
+            st.session_state["driver_filter"] = tr("all")
+        selected_driver = st.selectbox("Driver", options=driver_options, key="driver_filter")
+
+        hub_series = result_df["Hub"].fillna("").astype(str).str.strip()
+        hub_options = [tr("all")] + sorted([item for item in hub_series.unique().tolist() if item])
+        if st.session_state["hub_filter"] not in hub_options:
+            st.session_state["hub_filter"] = tr("all")
+        selected_hub = st.selectbox("Hub", options=hub_options, key="hub_filter")
+
+        contractor_series = result_df["Contractor"].fillna("").astype(str).str.strip()
+        contractor_options = [tr("all")] + sorted([item for item in contractor_series.unique().tolist() if item])
+        if st.session_state["contractor_filter"] not in contractor_options:
+            st.session_state["contractor_filter"] = tr("all")
+        selected_contractor = st.selectbox("Contractor", options=contractor_options, key="contractor_filter")
+
         ofd_series = pd.to_datetime(result_df["out_for_delivery_time"], errors="coerce")
         ofd_valid_dates = ofd_series.dropna().dt.date
         if not ofd_valid_dates.empty:
@@ -1502,6 +1540,18 @@ def main() -> None:
             filtered_df = filtered_df[
                 filtered_df["State"].fillna("").astype(str).str.strip() == selected_state
             ]
+        if selected_driver != tr("all"):
+            filtered_df = filtered_df[
+                filtered_df["Driver"].fillna("").astype(str).str.strip() == selected_driver
+            ]
+        if selected_hub != tr("all"):
+            filtered_df = filtered_df[
+                filtered_df["Hub"].fillna("").astype(str).str.strip() == selected_hub
+            ]
+        if selected_contractor != tr("all"):
+            filtered_df = filtered_df[
+                filtered_df["Contractor"].fillna("").astype(str).str.strip() == selected_contractor
+            ]
 
         filtered_df["_ofd_dt"] = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
         filtered_df = filtered_df[
@@ -1531,7 +1581,20 @@ def main() -> None:
             )
 
         st.subheader(tr("result_preview"))
-        st.dataframe(filtered_df.head(50), use_container_width=True)
+        preview_df = build_export_df(filtered_df)
+        st.dataframe(preview_df.head(50), use_container_width=True)
+
+        invalid_route_df = filtered_df[
+            filtered_df["Route_name"].fillna("").astype(str).str.strip().eq("")
+            | filtered_df["Driver"].fillna("").astype(str).str.strip().eq("")
+            | filtered_df["Hub"].fillna("").astype(str).str.strip().eq("")
+            | filtered_df["Contractor"].fillna("").astype(str).str.strip().eq("")
+        ][["trakcing_id", "Route_name"]].copy()
+        st.subheader(tr("invalid_route_section"))
+        if invalid_route_df.empty:
+            st.info(tr("invalid_route_empty"))
+        else:
+            st.dataframe(invalid_route_df, use_container_width=True)
 
         delivered_df = filtered_df[filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
         if not delivered_df.empty:
@@ -1539,7 +1602,8 @@ def main() -> None:
             delivered_df = delivered_df.sort_values(by=["_delivered_dt", "trakcing_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        csv_data = filtered_df.to_csv(index=False).encode("utf-8-sig")
+        export_df = build_export_df(filtered_df)
+        csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
         kpi_report_data = None
         c_csv, c_report = st.columns(2)
         c_csv.download_button(
@@ -1549,7 +1613,7 @@ def main() -> None:
             mime="text/csv",
         )
         try:
-            kpi_report_data = kpi_report_to_excel_bytes(kpi_payload, filtered_df)
+            kpi_report_data = kpi_report_to_excel_bytes(kpi_payload, export_df)
             c_report.download_button(
                 tr("download_report"),
                 data=kpi_report_data,
