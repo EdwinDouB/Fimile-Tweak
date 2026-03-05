@@ -340,24 +340,43 @@ def diff_hours(end_dt: datetime | None, start_dt: datetime | None) -> str:
 
 def parse_route(description: Any) -> str:
     text = "" if description is None else str(description)
-    match = re.search(r"route[:：\s-]*(.+)$", text, flags=re.IGNORECASE)
-    return match.group(1).strip() if match else ""
+    match = re.search(r"\broute\b\s*[:：-]?\s*(.+)$", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip("\"' \t-:：")
+    return ""
+
+
+def extract_route_parts(route_name: str) -> list[str]:
+    text = str(route_name or "").strip()
+    if not text:
+        return []
+
+    parts = [p.strip() for p in re.split(r"\s*[-–—]+\s*|\s+", text) if p and p.strip()]
+    return parts
 
 
 def parse_route_identity(route_name: str) -> dict[str, str]:
-    """Parse route format: HUB-路区号-日期-DSP-司机名"""
-    text = str(route_name or "").strip()
-    if not text:
+    """Parse route format: HUB-路区号-日期-DSP-司机名.
+
+    Be tolerant to mixed separators and minor format issues.
+    """
+    parts = extract_route_parts(route_name)
+    if len(parts) < 2:
         return {"Hub": "", "Contractor": "", "Driver": ""}
 
-    match = re.match(r"^([^-]+)-([^-]+)-([^-]+)-([^-]+)-(.+)$", text)
-    if not match:
-        return {"Hub": "", "Contractor": "", "Driver": ""}
+    contractor = ""
+    driver = ""
+
+    if len(parts) >= 4:
+        contractor = parts[-2]
+        driver = " ".join(parts[-1:]).title()
+    elif len(parts) == 3:
+        driver = parts[-1].title()
 
     return {
-        "Hub": match.group(1).strip(),
-        "Contractor": match.group(4).strip(),
-        "Driver": match.group(5).strip(),
+        "Hub": parts[0].upper(),
+        "Contractor": contractor.upper(),
+        "Driver": driver,
     }
 
 
@@ -571,9 +590,9 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "last_scanned_time": fmt_dt(last_scanned_time),
         "out_for_delivery_time": fmt_dt(out_for_delivery_time),
         "attempted_time": fmt_dt(attempted_time),
-        "failed_route": parse_route(fail_evt.get("description")) if fail_evt else "",
+        "failed_route": parse_route(event_description(fail_evt)) if fail_evt else "",
         "delivered_time": fmt_dt(delivered_time),
-        "success_route": parse_route(success_evt.get("description")) if success_evt else "",
+        "success_route": parse_route(event_description(success_evt)) if success_evt else "",
         "Route_name": "",
         "创建到入库时间": diff_hours(first_scanned_time, created_time),
         "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
@@ -669,6 +688,31 @@ def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     return df[[col for col in df.columns if col not in EXPORT_EXCLUDED_COLUMNS]].copy()
+
+
+def build_invalid_route_summary(df: pd.DataFrame) -> pd.DataFrame:
+    invalid_mask = (
+        df["Route_name"].fillna("").astype(str).str.strip().eq("")
+        | df["Driver"].fillna("").astype(str).str.strip().eq("")
+        | df["Hub"].fillna("").astype(str).str.strip().eq("")
+        | df["Contractor"].fillna("").astype(str).str.strip().eq("")
+    )
+    invalid_df = df.loc[invalid_mask, ["trakcing_id", "Route_name"]].copy()
+    if invalid_df.empty:
+        return invalid_df
+
+    invalid_df["Route_name"] = invalid_df["Route_name"].fillna("").astype(str).str.strip()
+    invalid_df.loc[invalid_df["Route_name"] == "", "Route_name"] = "(empty)"
+    grouped = (
+        invalid_df.groupby("Route_name", dropna=False)
+        .agg(
+            tracking_count=("trakcing_id", "count"),
+            tracking_ids=("trakcing_id", lambda s: ", ".join(s.astype(str).head(5))),
+        )
+        .reset_index()
+        .sort_values(by=["tracking_count", "Route_name"], ascending=[False, True])
+    )
+    return grouped
 
 
 def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -1587,12 +1631,7 @@ def main() -> None:
         preview_df = build_export_df(filtered_df)
         st.dataframe(preview_df.head(50), use_container_width=True)
 
-        invalid_route_df = filtered_df[
-            filtered_df["Route_name"].fillna("").astype(str).str.strip().eq("")
-            | filtered_df["Driver"].fillna("").astype(str).str.strip().eq("")
-            | filtered_df["Hub"].fillna("").astype(str).str.strip().eq("")
-            | filtered_df["Contractor"].fillna("").astype(str).str.strip().eq("")
-        ][["trakcing_id", "Route_name"]].copy()
+        invalid_route_df = build_invalid_route_summary(filtered_df)
         st.subheader(tr("invalid_route_section"))
         if invalid_route_df.empty:
             st.info(tr("invalid_route_empty"))
@@ -1632,3 +1671,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
