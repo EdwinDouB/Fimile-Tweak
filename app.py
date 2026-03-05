@@ -985,7 +985,7 @@ def render_percentage_pie(
 
     target.caption(title)
     target.vega_lite_chart(
-        chart_df,␊
+        chart_df,
         {
             "mark": {"type": "arc", "outerRadius": 100},
             "encoding": {
@@ -1665,6 +1665,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
