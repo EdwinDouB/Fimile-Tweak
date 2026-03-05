@@ -346,7 +346,7 @@ def parse_route(description: Any) -> str:
     return ""
 
 
-def extract_route_parts(route_name: str) -> list[str]:␊
+def extract_route_parts(route_name: str) -> list[str]:
     text = str(route_name or "").strip()
     if not text:
         return []
@@ -360,7 +360,7 @@ def is_valid_hub_name(hub: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z]{3}", str(hub or "").strip()))
 
 
-def parse_route_identity(route_name: str) -> dict[str, str]:␊
+def parse_route_identity(route_name: str) -> dict[str, str]:
     """Parse route format: HUB-路区号-日期-DSP-司机名.
 
     Be tolerant to mixed separators and minor format issues.
@@ -1680,5 +1680,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
