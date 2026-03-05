@@ -971,9 +971,11 @@ def render_percentage_pie(
     hit_label: str = "达标",
     miss_label: str = "未达标",
     chart_key: str | None = None,
+    container: Any | None = None,
 ) -> None:
+    target = container or st
     if total_count <= 0:
-        st.info(f"{title}：暂无可用数据")
+        target.info(f"{title}：暂无可用数据")
         return
 
     miss_count = max(total_count - hit_count, 0)
@@ -981,9 +983,9 @@ def render_percentage_pie(
     chart_df = chart_df[chart_df["数量"] > 0]
     chart_df["占比"] = (chart_df["数量"] / total_count).map(lambda x: f"{x:.2%}")
 
-    st.caption(title)
-    st.vega_lite_chart(
-        chart_df,
+    target.caption(title)
+    target.vega_lite_chart(
+        chart_df,␊
         {
             "mark": {"type": "arc", "outerRadius": 100},
             "encoding": {
@@ -1009,26 +1011,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
 
     kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
-
-    st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
-    delivered_detail_df = result_df.loc[
-        result_df["out_for_delivery_time"].notna() & result_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
-        [
-            "trakcing_id",
-            "Region",
-            "State",
-            "shipperName",
-            "out_for_delivery_time",
-            "delivered_time",
-        ],
-    ].copy()
-    delivered_detail_df["ofd_dt"] = to_datetime_series(delivered_detail_df, "out_for_delivery_time")
-    delivered_detail_df["delivered_dt"] = to_datetime_series(delivered_detail_df, "delivered_time")
-    delivered_detail_df["ofd_to_delivered_hours"] = (
-        delivered_detail_df["delivered_dt"] - delivered_detail_df["ofd_dt"]
-    ).dt.total_seconds() / 3600
-    for threshold in [24, 48, 72]:
-        delivered_detail_df[f"within_{threshold}h"] = (
+@@ -1032,110 +1034,112 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime |
             delivered_detail_df["delivered_dt"].notna()
             & (delivered_detail_df["ofd_to_delivered_hours"] >= 0)
             & (delivered_detail_df["ofd_to_delivered_hours"] < threshold)
@@ -1061,6 +1044,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             hit_label=f"<{threshold}h妥投",
             miss_label=f">={threshold}h或未妥投",
             chart_key=f"delivered_{threshold}_{refresh_key}",
+            container=delivered_cols[i],
         )
 
     st.markdown("#### 12/24/48/72 小时上网率（提货 -> 上网）")
@@ -1113,6 +1097,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             hit_label=f"<{threshold}h上网",
             miss_label=f">={threshold}h或未上网",
             chart_key=f"scan_{threshold}_{refresh_key}",
+            container=scan_cols[i],
         )
 
     st.markdown("#### 月丢包率（Last Scan 后 120h 内无后续轨迹，且排除未满 120h 运单）")
@@ -1680,6 +1665,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
