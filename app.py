@@ -142,6 +142,8 @@ I18N = {
         "kpi_empty": "暂无数据，无法计算 KPI。",
         "lost_detail": "丢包明细",
         "download_lost": "下载丢包明细",
+        "download_delivered": "下载妥投率明细",
+        "download_scan": "下载上网率明细",
         "lost_empty": "当前无符合丢包条件的运单。",
         "lost_no_scan": "没有 Last Scan 数据，无法计算月丢包率。",
     },
@@ -191,6 +193,8 @@ I18N = {
         "kpi_empty": "No data available to calculate KPI.",
         "lost_detail": "Lost Package Details",
         "download_lost": "Download Lost Details",
+        "download_delivered": "Download Delivery Rate Details",
+        "download_scan": "Download Scan Rate Details",
         "lost_empty": "No waybills match the lost-package condition.",
         "lost_no_scan": "No Last Scan data, monthly lost-package rate cannot be calculated.",
     },
@@ -739,7 +743,8 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
     chart_rows: list[dict[str, Any]] = []
 
     df["ofd_to_delivered_hours"] = (df["delivered_dt"] - df["ofd_dt"]).dt.total_seconds() / 3600
-    ofd_base = df[df["ofd_dt"].notna()].copy()
+    ofd_present_mask = df["out_for_delivery_time"].notna() & df["out_for_delivery_time"].astype(str).str.strip().ne("")
+    ofd_base = df[ofd_present_mask].copy()
 
     for threshold in [24, 48, 72]:
         within = ofd_base[
@@ -935,6 +940,40 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
     st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
+    delivered_detail_df = result_df.loc[
+        result_df["out_for_delivery_time"].notna() & result_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
+        [
+            "trakcing_id",
+            "Region",
+            "State",
+            "shipperName",
+            "out_for_delivery_time",
+            "delivered_time",
+        ],
+    ].copy()
+    delivered_detail_df["ofd_dt"] = to_datetime_series(delivered_detail_df, "out_for_delivery_time")
+    delivered_detail_df["delivered_dt"] = to_datetime_series(delivered_detail_df, "delivered_time")
+    delivered_detail_df["ofd_to_delivered_hours"] = (
+        delivered_detail_df["delivered_dt"] - delivered_detail_df["ofd_dt"]
+    ).dt.total_seconds() / 3600
+    for threshold in [24, 48, 72]:
+        delivered_detail_df[f"within_{threshold}h"] = (
+            delivered_detail_df["delivered_dt"].notna()
+            & (delivered_detail_df["ofd_to_delivered_hours"] >= 0)
+            & (delivered_detail_df["ofd_to_delivered_hours"] < threshold)
+        )
+    delivered_detail_df = delivered_detail_df.drop(columns=["ofd_dt", "delivered_dt"])
+
+    delivered_header_cols = st.columns([4, 1])
+    delivered_header_cols[1].download_button(
+        tr("download_delivered"),
+        data=delivered_detail_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"delivered_rate_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+        disabled=delivered_detail_df.empty,
+    )
+
     delivered_cols = st.columns(3)
     delivered_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "24/48/72 小时妥投率（上网 -> 妥投）"]
     for i, metric in enumerate(delivered_metrics):
@@ -954,6 +993,39 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
         )
 
     st.markdown("#### 12/24/48/72 小时上网率（提货 -> 上网）")
+    scan_detail_df = result_df[
+        [
+            "trakcing_id",
+            "Region",
+            "State",
+            "shipperName",
+            "created_time",
+            "first_scanned_time",
+        ]
+    ].copy()
+    scan_detail_df["created_dt"] = to_datetime_series(scan_detail_df, "created_time")
+    scan_detail_df["first_scanned_dt"] = to_datetime_series(scan_detail_df, "first_scanned_time")
+    scan_detail_df["created_to_scan_hours"] = (
+        scan_detail_df["first_scanned_dt"] - scan_detail_df["created_dt"]
+    ).dt.total_seconds() / 3600
+    for threshold in [12, 24, 48, 72]:
+        scan_detail_df[f"within_{threshold}h"] = (
+            scan_detail_df["first_scanned_dt"].notna()
+            & (scan_detail_df["created_to_scan_hours"] >= 0)
+            & (scan_detail_df["created_to_scan_hours"] < threshold)
+        )
+    scan_detail_df = scan_detail_df.drop(columns=["created_dt", "first_scanned_dt"])
+
+    scan_header_cols = st.columns([4, 1])
+    scan_header_cols[1].download_button(
+        tr("download_scan"),
+        data=scan_detail_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"scan_rate_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+        disabled=scan_detail_df.empty,
+    )
+
     scan_cols = st.columns(4)
     scan_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "12/24/48/72 小时上网率（提货 -> 上网）"]
     for i, metric in enumerate(scan_metrics):
@@ -1439,3 +1511,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
