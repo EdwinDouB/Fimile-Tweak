@@ -1045,6 +1045,67 @@ def _append_delivery_breakdown_rows(
     rows.append(row)
 
 
+def extract_route_numbers(series: pd.Series, limit: int = 5) -> str:
+    if series.empty:
+        return ""
+
+    route_numbers: list[str] = []
+    for value in series.fillna("").astype(str):
+        route_name = value.strip()
+        if not route_name:
+            continue
+
+        parts = [part.strip() for part in route_name.split("-") if part.strip()]
+        if len(parts) >= 2:
+            route_no = parts[1]
+        else:
+            match = re.search(r"([A-Za-z]*\d+[A-Za-z0-9]*)", route_name)
+            route_no = match.group(1) if match else ""
+
+        if route_no:
+            route_numbers.append(route_no)
+
+    if not route_numbers:
+        return ""
+
+    unique_route_numbers = list(dict.fromkeys(route_numbers))
+    return ", ".join(unique_route_numbers[:limit])
+
+
+def format_unknown_dimension_name(base_name: str, source_df: pd.DataFrame) -> str:
+    if "未知" not in base_name or "Route_name" not in source_df.columns:
+        return base_name
+
+    route_preview = extract_route_numbers(source_df["Route_name"], limit=5)
+    if not route_preview:
+        return base_name
+    return f"{base_name}（路线号：{route_preview}）"
+
+
+def style_breakdown_rows(table_df: pd.DataFrame) -> Any:
+    if table_df.empty or "样本数" not in table_df.columns:
+        return table_df
+
+    max_count = int(table_df["样本数"].max()) if not table_df["样本数"].empty else 0
+    if max_count <= 0:
+        return table_df
+
+    high_threshold = max(10, int(max_count * 0.6))
+    mid_threshold = max(3, int(max_count * 0.2))
+
+    def _style_row(row: pd.Series) -> list[str]:
+        sample_count = int(row.get("样本数", 0) or 0)
+        if sample_count >= high_threshold:
+            color = "#fde68a"  # 高量级：黄
+        elif sample_count >= mid_threshold:
+            color = "#bfdbfe"  # 中量级：蓝
+        else:
+            color = "#d1fae5"  # 低量级：绿
+        return [f"background-color: {color}"] * len(row)
+
+    return table_df.style.apply(_style_row, axis=1)
+
+
 def build_delivery_breakdown_table(delivered_detail_df: pd.DataFrame, thresholds: list[int]) -> pd.DataFrame:
     if delivered_detail_df.empty:
         return pd.DataFrame(columns=["维度", "样本数"])
@@ -1063,12 +1124,14 @@ def build_delivery_breakdown_table(delivered_detail_df: pd.DataFrame, thresholds
 
         for hub_name in sorted(region_df["Hub"].fillna("未知Hub").astype(str).str.strip().replace("", "未知Hub").unique()):
             hub_df = region_df[region_df["Hub"].fillna("未知Hub").astype(str).str.strip().replace("", "未知Hub") == hub_name]
-            _append_delivery_breakdown_rows(rows, f"  {hub_name}", hub_df, thresholds)
+            hub_display_name = format_unknown_dimension_name(hub_name, hub_df)
+            _append_delivery_breakdown_rows(rows, f"  {hub_display_name}", hub_df, thresholds)
 
             contractor_series = hub_df["Contractor"].fillna("未知Contractor").astype(str).str.strip().replace("", "未知Contractor")
             for contractor_name in sorted(contractor_series.unique()):
                 contractor_df = hub_df[contractor_series == contractor_name]
-                _append_delivery_breakdown_rows(rows, f"    {contractor_name}", contractor_df, thresholds)
+                contractor_display_name = format_unknown_dimension_name(contractor_name, contractor_df)
+                _append_delivery_breakdown_rows(rows, f"    {contractor_display_name}", contractor_df, thresholds)
 
     table_df = pd.DataFrame(rows)
     percent_cols = [f"<{threshold}h妥投率" for threshold in thresholds]
@@ -1149,6 +1212,7 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
             "shipperName",
             "Hub",
             "Contractor",
+            "Route_name",
             "out_for_delivery_time",
             "delivered_time",
         ],
@@ -1168,11 +1232,13 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     if layout_mode == "compact":
         render_compact_kpi_row(kpi_payload)
         st.markdown("##### 24小时妥投率明细")
-        st.dataframe(build_delivery_breakdown_table(delivered_detail_df, thresholds=[24]), use_container_width=True)
+        compact_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24])
+        st.dataframe(style_breakdown_rows(compact_breakdown_df), use_container_width=True)
         return kpi_payload
 
     st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
-    st.dataframe(build_delivery_breakdown_table(delivered_detail_df, thresholds=[24, 48, 72]), use_container_width=True)
+    detailed_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24, 48, 72])
+    st.dataframe(style_breakdown_rows(detailed_breakdown_df), use_container_width=True)
     delivered_detail_df = delivered_detail_df.drop(columns=["ofd_dt", "delivered_dt"])
 
     delivered_header_cols = st.columns([4, 1])
@@ -1827,6 +1893,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
