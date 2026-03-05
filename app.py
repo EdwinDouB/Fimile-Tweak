@@ -1042,6 +1042,13 @@ def _append_delivery_breakdown_rows(
         hit_count = int(source_df[hit_col].sum()) if hit_col in source_df.columns else 0
         row[f"<{threshold}h命中"] = hit_count
         row[f"<{threshold}h妥投率"] = rate(hit_count, total_count)
+
+    sample_tracking_ids = (
+        source_df["trakcing_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().head(8).tolist()
+        if "trakcing_id" in source_df.columns
+        else []
+    )
+    row["调试运单号示例"] = ", ".join(sample_tracking_ids)
     rows.append(row)
 
 
@@ -1083,24 +1090,21 @@ def format_unknown_dimension_name(base_name: str, source_df: pd.DataFrame) -> st
 
 
 def style_breakdown_rows(table_df: pd.DataFrame) -> Any:
-    if table_df.empty or "样本数" not in table_df.columns:
+    if table_df.empty or "维度" not in table_df.columns:
         return table_df
 
-    max_count = int(table_df["样本数"].max()) if not table_df["样本数"].empty else 0
-    if max_count <= 0:
-        return table_df
-
-    high_threshold = max(10, int(max_count * 0.6))
-    mid_threshold = max(3, int(max_count * 0.2))
+    level_colors = {
+        0: "#f3f4f6",  # 总体
+        1: "#dbeafe",  # 美西/美东
+        2: "#e0f2fe",  # HUB
+        3: "#ecfccb",  # Contractor
+    }
 
     def _style_row(row: pd.Series) -> list[str]:
-        sample_count = int(row.get("样本数", 0) or 0)
-        if sample_count >= high_threshold:
-            color = "#fde68a"  # 高量级：黄
-        elif sample_count >= mid_threshold:
-            color = "#bfdbfe"  # 中量级：蓝
-        else:
-            color = "#d1fae5"  # 低量级：绿
+        dimension_name = str(row.get("维度", ""))
+        leading_spaces = len(dimension_name) - len(dimension_name.lstrip(" "))
+        indent_level = min(3, leading_spaces // 2)
+        color = level_colors.get(indent_level, "#ffffff")
         return [f"background-color: {color}"] * len(row)
 
     return table_df.style.apply(_style_row, axis=1)
@@ -1893,8 +1897,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
 
