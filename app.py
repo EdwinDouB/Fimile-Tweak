@@ -1011,7 +1011,26 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
 
     kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
-@@ -1032,110 +1034,112 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime |
+
+    st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
+    delivered_detail_df = result_df.loc[
+        result_df["out_for_delivery_time"].notna() & result_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
+        [
+            "trakcing_id",
+            "Region",
+            "State",
+            "shipperName",
+            "out_for_delivery_time",
+            "delivered_time",
+        ],
+    ].copy()
+    delivered_detail_df["ofd_dt"] = to_datetime_series(delivered_detail_df, "out_for_delivery_time")
+    delivered_detail_df["delivered_dt"] = to_datetime_series(delivered_detail_df, "delivered_time")
+    delivered_detail_df["ofd_to_delivered_hours"] = (
+        delivered_detail_df["delivered_dt"] - delivered_detail_df["ofd_dt"]
+    ).dt.total_seconds() / 3600
+    for threshold in [24, 48, 72]:
+        delivered_detail_df[f"within_{threshold}h"] = (
             delivered_detail_df["delivered_dt"].notna()
             & (delivered_detail_df["ofd_to_delivered_hours"] >= 0)
             & (delivered_detail_df["ofd_to_delivered_hours"] < threshold)
@@ -1098,7 +1117,7 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
             miss_label=f">={threshold}h或未上网",
             chart_key=f"scan_{threshold}_{refresh_key}",
             container=scan_cols[i],
-        )
+        ))
 
     st.markdown("#### 月丢包率（Last Scan 后 120h 内无后续轨迹，且排除未满 120h 运单）")
     monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
@@ -1665,8 +1684,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
 
 
