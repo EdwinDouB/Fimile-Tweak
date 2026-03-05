@@ -145,6 +145,10 @@ I18N = {
         "compliant": "是否标记为合规",
         "open_beans": "打开 Beans 查看 POD",
         "kpi_title": "3) 时效与质量 KPI 图表",
+        "layout_mode_label": "KPI 布局模式",
+        "layout_mode_detailed": "详细模式（周/月）",
+        "layout_mode_compact": "简略模式（日）",
+        "compact_title": "24小时核心指标（日）",
         "kpi_empty": "暂无数据，无法计算 KPI。",
         "lost_detail": "丢包明细",
         "download_lost": "下载丢包明细",
@@ -200,6 +204,10 @@ I18N = {
         "compliant": "Marked as Compliant",
         "open_beans": "Open Beans POD",
         "kpi_title": "3) KPI Charts: Timeliness & Quality",
+        "layout_mode_label": "KPI Layout Mode",
+        "layout_mode_detailed": "Detailed (Week/Month)",
+        "layout_mode_compact": "Compact (Day)",
+        "compact_title": "24h Core Metrics (Daily)",
         "kpi_empty": "No data available to calculate KPI.",
         "lost_detail": "Lost Package Details",
         "download_lost": "Download Lost Details",
@@ -360,6 +368,11 @@ def is_valid_hub_name(hub: str) -> bool:
     return bool(re.fullmatch(r"[A-Za-z]{3}", str(hub or "").strip()))
 
 
+def is_valid_contractor_name(contractor: str) -> bool:
+    """Contractor must be exactly 2 or 3 letters (A-Z)."""
+    return bool(re.fullmatch(r"[A-Za-z]{2,3}", str(contractor or "").strip()))
+
+
 def parse_route_identity(route_name: str) -> dict[str, str]:
     """Parse route format: HUB-路区号-日期-DSP-司机名.
 
@@ -382,9 +395,13 @@ def parse_route_identity(route_name: str) -> dict[str, str]:
     if not is_valid_hub_name(hub):
         hub = ""
 
+    contractor = contractor.upper()
+    if contractor and not is_valid_contractor_name(contractor):
+        contractor = ""
+
     return {
         "Hub": hub,
-        "Contractor": contractor.upper(),
+        "Contractor": contractor,
         "Driver": driver,
     }
 
@@ -1003,7 +1020,30 @@ def render_percentage_pie(
     )
 
 
-def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
+def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
+    delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("指标") == "<24h 妥投率"), None)
+    scan_24h = next((m for m in kpi_payload["metrics"] if m.get("指标") == "<24h 上网率"), None)
+    lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
+
+    st.markdown(f"#### {tr('compact_title')}")
+    c1, c2, c3 = st.columns(3)
+    if delivered_24h:
+        c1.metric("24小时妥投率", f"{delivered_24h['占比']:.2%}", f"{delivered_24h['命中']}/{delivered_24h['总数']}")
+    else:
+        c1.metric("24小时妥投率", "0.00%", "0/0")
+
+    if scan_24h:
+        c2.metric("24小时上网率", f"{scan_24h['占比']:.2%}", f"{scan_24h['命中']}/{scan_24h['总数']}")
+    else:
+        c2.metric("24小时上网率", "0.00%", "0/0")
+
+    if lost_metric:
+        c3.metric("丢包率", f"{lost_metric['占比']:.2%}", f"{lost_metric['命中']}/{lost_metric['总数']}")
+    else:
+        c3.metric("丢包率", "0.00%", "0/0")
+
+
+def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     st.subheader(tr("kpi_title"))
     if result_df.empty:
         st.info(tr("kpi_empty"))
@@ -1011,6 +1051,10 @@ def render_kpi_charts(result_df: pd.DataFrame, fetch_reference_time: datetime | 
 
     kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
+
+    if layout_mode == "compact":
+        render_compact_kpi_row(kpi_payload)
+        return kpi_payload
 
     st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
     delivered_detail_df = result_df.loc[
@@ -1616,7 +1660,16 @@ def main() -> None:
             & (filtered_df["_ofd_dt"].dt.date < ofd_end_exclusive)
         ].drop(columns=["_ofd_dt"])
 
-        kpi_payload = render_kpi_charts(filtered_df, fetch_reference_time=st.session_state.get("fetch_clicked_at"))
+        layout_mode = st.radio(
+            tr("layout_mode_label"),
+            options=["detailed", "compact"],
+            index=0,
+            horizontal=True,
+            format_func=lambda x: tr("layout_mode_detailed") if x == "detailed" else tr("layout_mode_compact"),
+            key="kpi_layout_mode",
+        )
+
+        kpi_payload = render_kpi_charts(filtered_df, layout_mode=layout_mode, fetch_reference_time=st.session_state.get("fetch_clicked_at"))
 
         success_count = len(result_df) - len(failures)
         fail_count = len(failures)
@@ -1680,7 +1733,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
 
 
