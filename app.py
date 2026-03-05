@@ -126,7 +126,7 @@ I18N = {
         "invalid_route_section": "Route_name 不符合标准",
         "invalid_route_empty": "全部 Route_name 均符合标准。",
         "ofd_filter_start": "出库配送时间起始日期 (Out for Delivery)",
-        "ofd_filter_end": "出库配送时间结束日期 (Out for Delivery)",
+        "ofd_filter_end": "出库配送时间结束日期（不含当天） (Out for Delivery, Exclusive)",
         "all": "ALL",
         "success_count": "成功数量",
         "fail_count": "失败数量",
@@ -181,7 +181,7 @@ I18N = {
         "invalid_route_section": "Invalid Route_name",
         "invalid_route_empty": "All Route_name values are compliant.",
         "ofd_filter_start": "Out for Delivery Start Date",
-        "ofd_filter_end": "Out for Delivery End Date",
+        "ofd_filter_end": "Out for Delivery End Date (Exclusive)",
         "all": "ALL",
         "success_count": "Success Count",
         "fail_count": "Failure Count",
@@ -1554,10 +1554,13 @@ def main() -> None:
             ]
 
         filtered_df["_ofd_dt"] = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
+        ofd_end_exclusive = ofd_end_date
+        if ofd_end_exclusive <= ofd_start_date:
+            ofd_end_exclusive = ofd_start_date + timedelta(days=1)
         filtered_df = filtered_df[
             filtered_df["_ofd_dt"].notna()
             & (filtered_df["_ofd_dt"].dt.date >= ofd_start_date)
-            & (filtered_df["_ofd_dt"].dt.date <= ofd_end_date)
+            & (filtered_df["_ofd_dt"].dt.date < ofd_end_exclusive)
         ].drop(columns=["_ofd_dt"])
 
         kpi_payload = render_kpi_charts(filtered_df, fetch_reference_time=st.session_state.get("fetch_clicked_at"))
