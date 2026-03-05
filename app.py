@@ -1502,53 +1502,6 @@ def main() -> None:
     if result_df is not None:
         st.subheader(tr("filter_view"))
 
-        region_series = result_df["Region"].fillna("").astype(str).str.strip()
-        region_options = [tr("all")] + sorted([item for item in region_series.unique().tolist() if item])
-
-        if st.session_state["region_filter"] not in region_options:
-            st.session_state["region_filter"] = tr("all")
-
-        selected_region = st.selectbox(
-            "Region",
-            options=region_options,
-            key="region_filter",
-        )
-
-        if selected_region == tr("all"):
-            available_states_df = result_df
-        else:
-            available_states_df = result_df[result_df["Region"].fillna("").astype(str).str.strip() == selected_region]
-
-        state_series = available_states_df["State"].fillna("").astype(str).str.strip()
-        state_options = [tr("all")] + sorted([item for item in state_series.unique().tolist() if item])
-
-        if st.session_state["state_filter"] not in state_options:
-            st.session_state["state_filter"] = tr("all")
-
-        selected_state = st.selectbox(
-            "State",
-            options=state_options,
-            key="state_filter",
-        )
-
-        driver_series = result_df["Driver"].fillna("").astype(str).str.strip()
-        driver_options = [tr("all")] + sorted([item for item in driver_series.unique().tolist() if item])
-        if st.session_state["driver_filter"] not in driver_options:
-            st.session_state["driver_filter"] = tr("all")
-        selected_driver = st.selectbox("Driver", options=driver_options, key="driver_filter")
-
-        hub_series = result_df["Hub"].fillna("").astype(str).str.strip()
-        hub_options = [tr("all")] + sorted([item for item in hub_series.unique().tolist() if item])
-        if st.session_state["hub_filter"] not in hub_options:
-            st.session_state["hub_filter"] = tr("all")
-        selected_hub = st.selectbox("Hub", options=hub_options, key="hub_filter")
-
-        contractor_series = result_df["Contractor"].fillna("").astype(str).str.strip()
-        contractor_options = [tr("all")] + sorted([item for item in contractor_series.unique().tolist() if item])
-        if st.session_state["contractor_filter"] not in contractor_options:
-            st.session_state["contractor_filter"] = tr("all")
-        selected_contractor = st.selectbox("Contractor", options=contractor_options, key="contractor_filter")
-
         ofd_series = pd.to_datetime(result_df["out_for_delivery_time"], errors="coerce")
         ofd_valid_dates = ofd_series.dropna().dt.date
         if not ofd_valid_dates.empty:
@@ -1584,6 +1537,49 @@ def main() -> None:
                 max_value=default_ofd_end,
                 key="ofd_filter_end",
             )
+
+        region_series = result_df["Region"].fillna("").astype(str).str.strip()
+        region_options = [tr("all")] + sorted([item for item in region_series.unique().tolist() if item])
+        if st.session_state["region_filter"] not in region_options:
+            st.session_state["region_filter"] = tr("all")
+
+        driver_series = result_df["Driver"].fillna("").astype(str).str.strip()
+        driver_options = [tr("all")] + sorted([item for item in driver_series.unique().tolist() if item])
+        if st.session_state["driver_filter"] not in driver_options:
+            st.session_state["driver_filter"] = tr("all")
+
+        hub_series = result_df["Hub"].fillna("").astype(str).str.strip()
+        hub_options = [tr("all")] + sorted([item for item in hub_series.unique().tolist() if item])
+        if st.session_state["hub_filter"] not in hub_options:
+            st.session_state["hub_filter"] = tr("all")
+
+        contractor_series = result_df["Contractor"].fillna("").astype(str).str.strip()
+        contractor_options = [tr("all")] + sorted([item for item in contractor_series.unique().tolist() if item])
+        if st.session_state["contractor_filter"] not in contractor_options:
+            st.session_state["contractor_filter"] = tr("all")
+
+        filter_c1, filter_c2, filter_c3, filter_c4, filter_c5 = st.columns(5)
+        with filter_c1:
+            selected_region = st.selectbox("Region", options=region_options, key="region_filter")
+
+        if selected_region == tr("all"):
+            available_states_df = result_df
+        else:
+            available_states_df = result_df[result_df["Region"].fillna("").astype(str).str.strip() == selected_region]
+
+        state_series = available_states_df["State"].fillna("").astype(str).str.strip()
+        state_options = [tr("all")] + sorted([item for item in state_series.unique().tolist() if item])
+        if st.session_state["state_filter"] not in state_options:
+            st.session_state["state_filter"] = tr("all")
+
+        with filter_c2:
+            selected_state = st.selectbox("State", options=state_options, key="state_filter")
+        with filter_c3:
+            selected_driver = st.selectbox("Driver", options=driver_options, key="driver_filter")
+        with filter_c4:
+            selected_hub = st.selectbox("Hub", options=hub_options, key="hub_filter")
+        with filter_c5:
+            selected_contractor = st.selectbox("Contractor", options=contractor_options, key="contractor_filter")
 
         if ofd_start_date > ofd_end_date:
             ofd_start_date, ofd_end_date = ofd_end_date, ofd_start_date
@@ -1684,6 +1680,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
