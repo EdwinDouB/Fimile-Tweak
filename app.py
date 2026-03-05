@@ -121,6 +121,8 @@ I18N = {
         "processing": "处理中：{completed}/{total} - {tracking_id}",
         "done": "处理完成",
         "filter_view": "筛选视图",
+        "ofd_filter_start": "出库配送时间起始日期 (Out for Delivery)",
+        "ofd_filter_end": "出库配送时间结束日期 (Out for Delivery)",
         "all": "ALL",
         "success_count": "成功数量",
         "fail_count": "失败数量",
@@ -172,6 +174,8 @@ I18N = {
         "processing": "Processing: {completed}/{total} - {tracking_id}",
         "done": "Completed",
         "filter_view": "Filter View",
+        "ofd_filter_start": "Out for Delivery Start Date",
+        "ofd_filter_end": "Out for Delivery End Date",
         "all": "ALL",
         "success_count": "Success Count",
         "fail_count": "Failure Count",
@@ -1314,6 +1318,10 @@ def main() -> None:
         st.session_state["fetch_clicked_at"] = None
     if "language" not in st.session_state:
         st.session_state["language"] = "zh"
+    if "ofd_filter_start" not in st.session_state:
+        st.session_state["ofd_filter_start"] = date.today() - timedelta(days=7)
+    if "ofd_filter_end" not in st.session_state:
+        st.session_state["ofd_filter_end"] = date.today()
 
     st.selectbox(
         tr("language_label"),
@@ -1446,6 +1454,45 @@ def main() -> None:
             key="state_filter",
         )
 
+        ofd_series = pd.to_datetime(result_df["out_for_delivery_time"], errors="coerce")
+        ofd_valid_dates = ofd_series.dropna().dt.date
+        if not ofd_valid_dates.empty:
+            default_ofd_start = ofd_valid_dates.min()
+            default_ofd_end = ofd_valid_dates.max()
+        else:
+            default_ofd_start = date.today() - timedelta(days=7)
+            default_ofd_end = date.today()
+
+        current_ofd_start = st.session_state.get("ofd_filter_start", default_ofd_start)
+        current_ofd_end = st.session_state.get("ofd_filter_end", default_ofd_end)
+        current_ofd_start = max(default_ofd_start, min(current_ofd_start, default_ofd_end))
+        current_ofd_end = max(default_ofd_start, min(current_ofd_end, default_ofd_end))
+        if current_ofd_start > current_ofd_end:
+            current_ofd_start = current_ofd_end
+        st.session_state["ofd_filter_start"] = current_ofd_start
+        st.session_state["ofd_filter_end"] = current_ofd_end
+
+        ofd_c1, ofd_c2 = st.columns(2)
+        with ofd_c1:
+            ofd_start_date = st.date_input(
+                tr("ofd_filter_start"),
+                value=current_ofd_start,
+                min_value=default_ofd_start,
+                max_value=default_ofd_end,
+                key="ofd_filter_start",
+            )
+        with ofd_c2:
+            ofd_end_date = st.date_input(
+                tr("ofd_filter_end"),
+                value=current_ofd_end,
+                min_value=default_ofd_start,
+                max_value=default_ofd_end,
+                key="ofd_filter_end",
+            )
+
+        if ofd_start_date > ofd_end_date:
+            ofd_start_date, ofd_end_date = ofd_end_date, ofd_start_date
+
         filtered_df = result_df.copy()
         if selected_region != tr("all"):
             filtered_df = filtered_df[
@@ -1455,6 +1502,13 @@ def main() -> None:
             filtered_df = filtered_df[
                 filtered_df["State"].fillna("").astype(str).str.strip() == selected_state
             ]
+
+        filtered_df["_ofd_dt"] = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
+        filtered_df = filtered_df[
+            filtered_df["_ofd_dt"].notna()
+            & (filtered_df["_ofd_dt"].dt.date >= ofd_start_date)
+            & (filtered_df["_ofd_dt"].dt.date <= ofd_end_date)
+        ].drop(columns=["_ofd_dt"])
 
         kpi_payload = render_kpi_charts(filtered_df, fetch_reference_time=st.session_state.get("fetch_clicked_at"))
 
@@ -1511,4 +1565,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
