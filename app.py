@@ -157,6 +157,11 @@ I18N = {
         "layout_mode_detailed": "详细模式（周/月）",
         "layout_mode_compact": "简略模式（日）",
         "compact_title": "24小时核心指标（日）",
+        "daily_created_chart": "按创建日期统计包裹总数",
+        "daily_delivered_chart": "按妥投日期统计包裹总数",
+        "daily_eval_weight_chart": "按日期统计包裹评价重量",
+        "compact_eval_weight": "所选包裹评价重量",
+        "eval_weight_empty": "暂无可用评分数据",
         "kpi_empty": "暂无数据，无法计算 KPI。",
         "lost_detail": "丢包明细",
         "download_lost": "下载丢包明细",
@@ -223,6 +228,11 @@ I18N = {
         "layout_mode_detailed": "Detailed (Week/Month)",
         "layout_mode_compact": "Compact (Day)",
         "compact_title": "24h Core Metrics (Daily)",
+        "daily_created_chart": "Daily package count by created date",
+        "daily_delivered_chart": "Daily package count by delivered date",
+        "daily_eval_weight_chart": "Daily package evaluation weight",
+        "compact_eval_weight": "Selected package evaluation weight",
+        "eval_weight_empty": "No score data available",
         "kpi_empty": "No data available to calculate KPI.",
         "lost_detail": "Lost Package Details",
         "download_lost": "Download Lost Details",
@@ -1299,6 +1309,69 @@ def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
         c3.info("丢包占比：暂无可用数据")
 
 
+def calculate_package_evaluation_weight(source_df: pd.DataFrame) -> pd.Series:
+    score_cols = [col for col in source_df.columns if col.startswith("pod_score_")]
+    if not score_cols:
+        return pd.Series([0.0] * len(source_df), index=source_df.index, dtype="float64")
+
+    score_df = source_df[score_cols].apply(pd.to_numeric, errors="coerce")
+    return score_df.mean(axis=1, skipna=True).fillna(0.0)
+
+
+def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
+    chart_df = result_df.copy()
+    chart_df["_created_date"] = pd.to_datetime(chart_df["created_time"], errors="coerce").dt.date
+    chart_df["_delivered_date"] = pd.to_datetime(chart_df["delivered_time"], errors="coerce").dt.date
+    chart_df["_evaluation_weight"] = calculate_package_evaluation_weight(chart_df)
+
+    created_count_df = (
+        chart_df[chart_df["_created_date"].notna()]
+        .groupby("_created_date")
+        .size()
+        .rename("包裹总数")
+        .reset_index()
+        .sort_values("_created_date")
+    )
+    delivered_count_df = (
+        chart_df[chart_df["_delivered_date"].notna()]
+        .groupby("_delivered_date")
+        .size()
+        .rename("包裹总数")
+        .reset_index()
+        .sort_values("_delivered_date")
+    )
+    evaluation_weight_df = (
+        chart_df[chart_df["_created_date"].notna()]
+        .groupby("_created_date")["_evaluation_weight"]
+        .sum()
+        .rename("评价重量")
+        .reset_index()
+        .sort_values("_created_date")
+    )
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"#### {tr('daily_created_chart')}")
+        if created_count_df.empty:
+            st.info(tr("kpi_empty"))
+        else:
+            st.line_chart(created_count_df.set_index("_created_date")["包裹总数"])
+
+    with c2:
+        st.markdown(f"#### {tr('daily_delivered_chart')}")
+        if delivered_count_df.empty:
+            st.info(tr("kpi_empty"))
+        else:
+            st.line_chart(delivered_count_df.set_index("_delivered_date")["包裹总数"])
+
+    st.markdown(f"#### {tr('daily_eval_weight_chart')}")
+    if evaluation_weight_df.empty:
+        st.info(tr("eval_weight_empty"))
+    else:
+        st.line_chart(evaluation_weight_df.set_index("_created_date")["评价重量"])
+
+
+
 def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     st.subheader(tr("kpi_title"))
     if result_df.empty:
@@ -1337,10 +1410,14 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
 
     if layout_mode == "compact":
         render_compact_kpi_row(kpi_payload)
+        selected_eval_weight = calculate_package_evaluation_weight(result_df).sum()
+        st.metric(tr("compact_eval_weight"), f"{selected_eval_weight:.2f}")
         st.markdown("##### 24小时妥投率明细")
         compact_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24])
         st.dataframe(style_breakdown_rows(compact_breakdown_df), use_container_width=True)
         return kpi_payload
+
+    render_daily_kpi_charts(result_df)
 
     st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
     detailed_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24, 48, 72])
@@ -2071,6 +2148,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
