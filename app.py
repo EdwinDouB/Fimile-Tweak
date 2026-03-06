@@ -837,7 +837,16 @@ def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
+    required_columns = [
+        "sender_company",
+        "sender_province",
+        "sender_city",
+        "sender_address",
+        "out_for_delivery_time",
+        "trakcing_id",
+    ]
+
+    if df.empty or any(col not in df.columns for col in required_columns):
         return pd.DataFrame(columns=[tr("customer_name"), tr("shipping_address"), tr("package_count"), tr("avg_daily_share")])
 
     work_df = df.copy()
@@ -2308,6 +2317,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
