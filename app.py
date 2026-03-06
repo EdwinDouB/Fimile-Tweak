@@ -1901,13 +1901,14 @@ def main() -> None:
             ]
 
         filtered_df["_ofd_dt"] = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
-        ofd_end_exclusive = ofd_end_date
-        if ofd_end_exclusive <= ofd_start_date:
-            ofd_end_exclusive = ofd_start_date + timedelta(days=1)
+        ofd_start_ts = pd.Timestamp(ofd_start_date)
+        ofd_end_exclusive_ts = pd.Timestamp(ofd_end_date)
+        if ofd_end_exclusive_ts <= ofd_start_ts:
+            ofd_end_exclusive_ts = ofd_start_ts + pd.Timedelta(days=1)
         filtered_df = filtered_df[
             filtered_df["_ofd_dt"].notna()
-            & (filtered_df["_ofd_dt"].dt.date >= ofd_start_date)
-            & (filtered_df["_ofd_dt"].dt.date < ofd_end_exclusive)
+            & (filtered_df["_ofd_dt"] >= ofd_start_ts)
+            & (filtered_df["_ofd_dt"] < ofd_end_exclusive_ts)
         ].drop(columns=["_ofd_dt"])
 
         non_pickup_filtered_df, pickup_filtered_df = split_pickup_routes(filtered_df)
@@ -2009,6 +2010,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
