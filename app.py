@@ -109,9 +109,11 @@ I18N = {
         "mode_db": "数据库按日期",
         "mode_file": "上传文件",
         "mode_text": "文本粘贴",
+        "mode_text_db": "文本粘贴 + 数据库按日期",
         "start_date": "起始日期 (Created_at)",
         "end_date": "结束日期 (Created_at)",
         "load_btn": "从数据库加载运单号",
+        "load_merge_btn": "从数据库加载并合并",
         "loading_db": "查询数据库中...",
         "no_tracking_found": "该日期范围内未找到任何 tracking_number",
         "db_preview": "数据库返回运单号预览（前 50 / 共 {count}）",
@@ -124,6 +126,8 @@ I18N = {
         "processing": "处理中：{completed}/{total} - {tracking_id}",
         "done": "处理完成",
         "filter_view": "筛选视图",
+        "hide_unknown_btn": "隐藏未知 DSP/Hub",
+        "show_unknown_btn": "显示未知 DSP/Hub",
         "invalid_route_section": "Route_name 不符合标准",
         "invalid_route_empty": "全部 Route_name 均符合标准。",
         "pickup_section": "Pick up 路由（不计入妥投率统计）",
@@ -171,9 +175,11 @@ I18N = {
         "mode_db": "Database by Date",
         "mode_file": "Upload File",
         "mode_text": "Paste Text",
+        "mode_text_db": "Paste Text + Database by Date",
         "start_date": "Start Date (Created_at)",
         "end_date": "End Date (Created_at)",
         "load_btn": "Load Tracking IDs from DB",
+        "load_merge_btn": "Load and Merge from DB",
         "loading_db": "Querying database...",
         "no_tracking_found": "No tracking numbers found in this date range",
         "db_preview": "DB Tracking Preview (Top 50 / Total {count})",
@@ -186,6 +192,8 @@ I18N = {
         "processing": "Processing: {completed}/{total} - {tracking_id}",
         "done": "Completed",
         "filter_view": "Filter View",
+        "hide_unknown_btn": "Hide Unknown DSP/Hub",
+        "show_unknown_btn": "Show Unknown DSP/Hub",
         "invalid_route_section": "Invalid Route_name",
         "invalid_route_empty": "All Route_name values are compliant.",
         "pickup_section": "Pick up routes (excluded from delivery-rate KPI)",
@@ -899,6 +907,14 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
         "candidate_mask": candidate_mask,
         "immature_mask": immature_mask,
     }
+
+def is_unknown_dimension_value(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    if not text:
+        return True
+    return "未知" in text or "unknown" in text
+
+
 
 def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     df = result_df.copy()
@@ -1693,7 +1709,9 @@ def main() -> None:
         st.session_state["ofd_filter_start"] = date.today() - timedelta(days=7)
     if "ofd_filter_end" not in st.session_state:
         st.session_state["ofd_filter_end"] = date.today()
-
+    if "hide_unknown_dimensions" not in st.session_state:
+        st.session_state["hide_unknown_dimensions"] = False
+        
     st.selectbox(
         tr("language_label"),
         options=["zh", "en"],
@@ -1702,7 +1720,11 @@ def main() -> None:
     )
 
     st.subheader(tr("input_section"))
-    mode = st.radio(tr("input_mode"), [tr("mode_db"), tr("mode_file"), tr("mode_text")], horizontal=True)
+    mode = st.radio(
+        tr("input_mode"),
+        [tr("mode_db"), tr("mode_file"), tr("mode_text"), tr("mode_text_db")],
+        horizontal=True,
+    )
 
     raw_ids: list[str] = []
 
@@ -1737,9 +1759,39 @@ def main() -> None:
         file = st.file_uploader(tr("upload_file"), type=["csv", "xlsx"])
         raw_ids = read_uploaded_ids(file)
 
-    else:
-        text = st.text_area(tr("paste_ids"), height=180)
+    elif mode == tr("mode_text"):
+        text = st.text_area(tr("paste_ids"), height=180, key="paste_text_only")
         raw_ids = split_text_ids(text)
+
+    else:
+        text = st.text_area(tr("paste_ids"), height=180, key="paste_text_with_db")
+        pasted_ids = split_text_ids(text)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            start_d = st.date_input(tr("start_date"), value=date.today() - timedelta(days=1), key="text_db_start_date")
+        with c2:
+            end_d = st.date_input(tr("end_date"), value=date.today(), key="text_db_end_date")
+
+        merge_btn = st.button(tr("load_merge_btn"), type="primary")
+        if merge_btn:
+            with st.spinner(tr("loading_db")):
+                try:
+                    db_raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
+                    st.session_state["db_raw_ids"] = db_raw_ids
+                    if not db_raw_ids:
+                        st.warning(tr("no_tracking_found"))
+                except Exception as e:
+                    st.error(str(e))
+                    st.session_state["db_raw_ids"] = []
+
+        db_raw_ids = st.session_state.get("db_raw_ids", [])
+        raw_ids = pasted_ids + db_raw_ids
+
+        if db_raw_ids:
+            with st.expander(tr("db_preview", count=len(db_raw_ids)), expanded=False):
+                st.write(db_raw_ids[:50])
+
 
     cleaned, dedup_ids, counter = normalize_tracking_ids(raw_ids, uppercase=False)
     duplicate_ids = [k for k, v in counter.items() if v > 1]
@@ -1755,6 +1807,7 @@ def main() -> None:
             st.write(duplicate_ids)
 
     st.subheader(tr("fetch_section"))
+
     if st.button(tr("fetch_btn"), type="primary", disabled=not dedup_ids):
         st.session_state["fetch_clicked_at"] = datetime.now()
         failures: list[dict[str, str]] = []
@@ -1795,7 +1848,10 @@ def main() -> None:
 
     if result_df is not None:
         st.subheader(tr("filter_view"))
-
+        toggle_label = tr("show_unknown_btn") if st.session_state.get("hide_unknown_dimensions", False) else tr("hide_unknown_btn")
+        if st.button(toggle_label):
+            st.session_state["hide_unknown_dimensions"] = not st.session_state.get("hide_unknown_dimensions", False)
+            
         ofd_series = pd.to_datetime(result_df["out_for_delivery_time"], errors="coerce")
         ofd_valid_dates = ofd_series.dropna().dt.date
         if not ofd_valid_dates.empty:
@@ -1900,6 +1956,11 @@ def main() -> None:
                 filtered_df["Contractor"].fillna("").astype(str).str.strip() == selected_contractor
             ]
 
+        if st.session_state.get("hide_unknown_dimensions", False):
+            known_mask = (~filtered_df["Hub"].map(is_unknown_dimension_value)) & (~filtered_df["Contractor"].map(is_unknown_dimension_value))
+            filtered_df = filtered_df[known_mask]
+
+        
         filtered_df["_ofd_dt"] = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
         ofd_start_ts = pd.Timestamp(ofd_start_date)
         ofd_end_exclusive_ts = pd.Timestamp(ofd_end_date)
@@ -2010,6 +2071,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
