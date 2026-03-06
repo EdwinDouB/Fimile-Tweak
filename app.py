@@ -64,6 +64,10 @@ OUTPUT_COLUMNS = [
     "Region",
     "State",
     "shipperName",
+    "sender_company",
+    "sender_province",
+    "sender_city",
+    "sender_address",
     "Driver",
     "Hub",
     "Contractor",
@@ -135,6 +139,13 @@ I18N = {
         "download_pickup": "下载 Pick up 明细",
         "ofd_filter_start": "出库配送时间起始日期 (Out for Delivery)",
         "ofd_filter_end": "出库配送时间结束日期（不含当天） (Out for Delivery, Exclusive)",
+        "apply_ofd_filter": "应用出库配送时间筛选",
+        "customer_summary_section": "客户与收货地址占比",
+        "customer_name": "客户名",
+        "shipping_address": "收货地址",
+        "package_count": "包裹数",
+        "avg_daily_share": "平均每日占比",
+        "customer_summary_empty": "当前筛选条件下暂无客户地址数据。",
         "all": "ALL",
         "success_count": "成功数量",
         "fail_count": "失败数量",
@@ -206,6 +217,13 @@ I18N = {
         "download_pickup": "Download Pick up details",
         "ofd_filter_start": "Out for Delivery Start Date",
         "ofd_filter_end": "Out for Delivery End Date (Exclusive)",
+        "apply_ofd_filter": "Apply Out for Delivery date filter",
+        "customer_summary_section": "Customer & Shipping Address Share",
+        "customer_name": "Customer",
+        "shipping_address": "Shipping Address",
+        "package_count": "Package Count",
+        "avg_daily_share": "Avg Daily Share",
+        "customer_summary_empty": "No customer/address data under current filters.",
         "all": "ALL",
         "success_count": "Success Count",
         "fail_count": "Failure Count",
@@ -816,6 +834,60 @@ def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     return df[[col for col in df.columns if col not in EXPORT_EXCLUDED_COLUMNS]].copy()
+
+
+def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=[tr("customer_name"), tr("shipping_address"), tr("package_count"), tr("avg_daily_share")])
+
+    work_df = df.copy()
+    work_df["sender_company"] = work_df["sender_company"].fillna("").astype(str).str.strip()
+    work_df["shipping_address"] = (
+        work_df["sender_province"].fillna("").astype(str).str.strip()
+        + " "
+        + work_df["sender_city"].fillna("").astype(str).str.strip()
+        + " "
+        + work_df["sender_address"].fillna("").astype(str).str.strip()
+    ).str.replace(r"\s+", " ", regex=True).str.strip()
+    work_df["_ofd_day"] = pd.to_datetime(work_df["out_for_delivery_time"], errors="coerce").dt.date
+
+    work_df = work_df[
+        (work_df["sender_company"] != "")
+        & (work_df["shipping_address"] != "")
+        & work_df["_ofd_day"].notna()
+    ]
+    if work_df.empty:
+        return pd.DataFrame(columns=[tr("customer_name"), tr("shipping_address"), tr("package_count"), tr("avg_daily_share")])
+
+    daily_total = work_df.groupby("_ofd_day")["trakcing_id"].count().rename("daily_total")
+    daily_group = (
+        work_df.groupby(["_ofd_day", "sender_company", "shipping_address"])["trakcing_id"]
+        .count()
+        .rename("daily_count")
+        .reset_index()
+    )
+    daily_group = daily_group.merge(daily_total.reset_index(), on="_ofd_day", how="left")
+    daily_group["daily_share"] = daily_group["daily_count"] / daily_group["daily_total"]
+
+    summary = (
+        daily_group.groupby(["sender_company", "shipping_address"], as_index=False)
+        .agg(
+            package_count=("daily_count", "sum"),
+            avg_daily_share=("daily_share", "mean"),
+        )
+        .sort_values(by=["avg_daily_share", "package_count"], ascending=[False, False])
+    )
+
+    summary = summary.rename(
+        columns={
+            "sender_company": tr("customer_name"),
+            "shipping_address": tr("shipping_address"),
+            "package_count": tr("package_count"),
+            "avg_daily_share": tr("avg_daily_share"),
+        }
+    )
+    summary[tr("avg_daily_share")] = summary[tr("avg_daily_share")].map(lambda x: f"{x:.2%}")
+    return summary
 
 
 def build_invalid_route_summary(df: pd.DataFrame) -> pd.DataFrame:
@@ -1698,9 +1770,73 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
     return receive_province_map
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, str]]:
+    """
+    Query sender fields from waybill_waybills for given tracking_ids.
+    """
+    _require_db_env()
+
+    try:
+        import pymysql  # type: ignore
+    except Exception as e:
+        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+
+    if not tracking_ids:
+        return {}
+
+    tracking_ids_clean = tuple(str(tid).strip() for tid in tracking_ids if str(tid).strip())
+    if not tracking_ids_clean:
+        return {}
+
+    conn = pymysql.connect(
+        host=MYSQL_HOST,
+        port=MYSQL_PORT,
+        user=MYSQL_USERNAME,
+        password=MYSQL_PASSWORD,
+        database=MYSQL_DATABASE,
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+    )
+
+    sender_info_map: dict[str, dict[str, str]] = {}
+    try:
+        with conn.cursor() as cur:
+            chunk_size = 500
+            for i in range(0, len(tracking_ids_clean), chunk_size):
+                chunk = tracking_ids_clean[i : i + chunk_size]
+                placeholders = ", ".join(["%s"] * len(chunk))
+                sql = f"""
+                    SELECT tracking_number, sender_company, sender_province, sender_city, sender_address
+                    FROM waybill_waybills
+                    WHERE tracking_number IN ({placeholders})
+                """
+                cur.execute(sql, chunk)
+                while True:
+                    rows = cur.fetchmany(DB_FETCH_BATCH_SIZE)
+                    if not rows:
+                        break
+                    for row in rows:
+                        tracking_number = str(row.get("tracking_number") or "").strip()
+                        if not tracking_number:
+                            continue
+                        sender_info_map[tracking_number] = {
+                            "sender_company": str(row.get("sender_company") or "").strip(),
+                            "sender_province": str(row.get("sender_province") or "").strip(),
+                            "sender_city": str(row.get("sender_city") or "").strip(),
+                            "sender_address": str(row.get("sender_address") or "").strip(),
+                        }
+    finally:
+        conn.close()
+
+    return sender_info_map
+
+
 def process_tracking_ids(
     dedup_ids: list[str],
     receive_province_map: dict[str, str],
+    sender_info_map: dict[str, dict[str, str]],
     progress_bar,
     status_text,
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
@@ -1738,6 +1874,11 @@ def process_tracking_ids(
             state = str(receive_province_map.get(tracking_id) or "").strip()
             row["State"] = normalize_state(state)
             row["Region"] = infer_region_from_state(state)
+            sender_info = sender_info_map.get(tracking_id, {})
+            row["sender_company"] = str(sender_info.get("sender_company") or "").strip()
+            row["sender_province"] = str(sender_info.get("sender_province") or "").strip()
+            row["sender_city"] = str(sender_info.get("sender_city") or "").strip()
+            row["sender_address"] = str(sender_info.get("sender_address") or "").strip()
             rows_by_id[tracking_id] = row
 
             if failure:
@@ -1788,6 +1929,8 @@ def main() -> None:
         st.session_state["ofd_filter_end"] = date.today()
     if "hide_unknown_dimensions" not in st.session_state:
         st.session_state["hide_unknown_dimensions"] = False
+    if "apply_ofd_filter" not in st.session_state:
+        st.session_state["apply_ofd_filter"] = True
         
     st.selectbox(
         tr("language_label"),
@@ -1889,11 +2032,17 @@ def main() -> None:
         st.session_state["fetch_clicked_at"] = datetime.now()
         failures: list[dict[str, str]] = []
         receive_province_map: dict[str, str] = {}
+        sender_info_map: dict[str, dict[str, str]] = {}
 
         try:
             receive_province_map = fetch_receive_province_map(tuple(dedup_ids))
         except Exception as e:
             st.warning(tr("state_region_fail", error=e))
+
+        try:
+            sender_info_map = fetch_sender_info_map(tuple(dedup_ids))
+        except Exception:
+            sender_info_map = {}
 
         progress = st.progress(0)
         status = st.empty()
@@ -1901,6 +2050,7 @@ def main() -> None:
         result_df, failures = process_tracking_ids(
             dedup_ids=dedup_ids,
             receive_province_map=receive_province_map,
+            sender_info_map=sender_info_map,
             progress_bar=progress,
             status_text=status,
         )
@@ -1964,6 +2114,8 @@ def main() -> None:
                 max_value=default_ofd_end,
                 key="ofd_filter_end",
             )
+
+        st.checkbox(tr("apply_ofd_filter"), key="apply_ofd_filter")
 
         region_series = result_df["Region"].fillna("").astype(str).str.strip()
         region_options = [tr("all")] + sorted([item for item in region_series.unique().tolist() if item])
@@ -2038,16 +2190,17 @@ def main() -> None:
             filtered_df = filtered_df[known_mask]
 
         
-        filtered_df["_ofd_dt"] = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
-        ofd_start_ts = pd.Timestamp(ofd_start_date)
-        ofd_end_exclusive_ts = pd.Timestamp(ofd_end_date)
-        if ofd_end_exclusive_ts <= ofd_start_ts:
-            ofd_end_exclusive_ts = ofd_start_ts + pd.Timedelta(days=1)
-        filtered_df = filtered_df[
-            filtered_df["_ofd_dt"].notna()
-            & (filtered_df["_ofd_dt"] >= ofd_start_ts)
-            & (filtered_df["_ofd_dt"] < ofd_end_exclusive_ts)
-        ].drop(columns=["_ofd_dt"])
+        if st.session_state.get("apply_ofd_filter", True):
+            filtered_df["_ofd_dt"] = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
+            ofd_start_ts = pd.Timestamp(ofd_start_date)
+            ofd_end_exclusive_ts = pd.Timestamp(ofd_end_date)
+            if ofd_end_exclusive_ts <= ofd_start_ts:
+                ofd_end_exclusive_ts = ofd_start_ts + pd.Timedelta(days=1)
+            filtered_df = filtered_df[
+                filtered_df["_ofd_dt"].notna()
+                & (filtered_df["_ofd_dt"] >= ofd_start_ts)
+                & (filtered_df["_ofd_dt"] < ofd_end_exclusive_ts)
+            ].drop(columns=["_ofd_dt"])
 
         non_pickup_filtered_df, pickup_filtered_df = split_pickup_routes(filtered_df)
 
@@ -2083,6 +2236,13 @@ def main() -> None:
         st.subheader(tr("result_preview"))
         preview_df = build_export_df(filtered_df)
         st.dataframe(preview_df.head(50), use_container_width=True)
+
+        st.subheader(tr("customer_summary_section"))
+        customer_summary_df = build_customer_address_summary(filtered_df)
+        if customer_summary_df.empty:
+            st.info(tr("customer_summary_empty"))
+        else:
+            st.dataframe(customer_summary_df, use_container_width=True)
 
         invalid_route_df = build_invalid_route_summary(filtered_df)
         st.subheader(tr("invalid_route_section"))
@@ -2148,7 +2308,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 
 
 
