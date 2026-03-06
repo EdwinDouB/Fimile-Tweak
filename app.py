@@ -599,6 +599,44 @@ def has_customer_service_record(events: list[dict[str, Any]]) -> bool:
     return False
 
 
+def extract_hub_from_scan_description(description: str) -> str:
+    desc = str(description or "").strip()
+    if not desc:
+        return ""
+
+    if "g.t. miami" in desc.lower():
+        return "MIA"
+
+    match = re.search(r"\bFM[_\-\s]*([A-Za-z]{3})\b", desc, flags=re.IGNORECASE)
+    if not match:
+        return ""
+    return match.group(1).upper()
+
+
+def infer_hub_from_pre_ofd_scan(events: list[dict[str, Any]], ofd_evt: dict[str, Any] | None) -> str:
+    ofd_ts = event_ts(ofd_evt) if ofd_evt else None
+    scan_events: list[dict[str, Any]] = []
+
+    for evt in events:
+        description = event_description(evt)
+        desc_lower = description.strip().lower()
+        if not (desc_lower.startswith("scan at") or desc_lower.startswith("scanned at")):
+            continue
+
+        evt_ts = event_ts(evt)
+        if ofd_ts is not None and evt_ts is not None and evt_ts > ofd_ts:
+            continue
+
+        scan_events.append(evt)
+
+    if not scan_events:
+        return ""
+
+    scan_events.sort(key=lambda e: ((event_ts(e) if event_ts(e) is not None else -1), events.index(e)))
+    target_evt = scan_events[-1]
+    return extract_hub_from_scan_description(event_description(target_evt))
+
+
 def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     events = normalize_events(payload)
     shipper_name = extract_shipper_name_from_events(events)
@@ -613,6 +651,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     last_scanned_evt = last_event_by_predicate(events, scanned_predicate)
 
     ofd_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"out-for-delivery", "ofd", "outfordelivery"})
+    scan_hub = infer_hub_from_pre_ofd_scan(events, ofd_evt)
     fail_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
     success_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
 
@@ -634,6 +673,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
             or ""
         ),
         "has_customer_service": "1" if customer_service_hit else "0",
+        "Hub": scan_hub,
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
         "last_scanned_time": fmt_dt(last_scanned_time),
@@ -731,7 +771,9 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         route_info = parse_route_identity(route_name)
         df.at[idx, "Route_name"] = route_name
         df.at[idx, "Driver"] = route_info["Driver"]
-        df.at[idx, "Hub"] = route_info["Hub"]
+        fallback_hub = str(row.get("Hub") or "").strip().upper()
+        parsed_hub = route_info["Hub"].strip().upper()
+        df.at[idx, "Hub"] = parsed_hub or fallback_hub
         df.at[idx, "Contractor"] = route_info["Contractor"]
         df.at[idx, "Route_type"] = route_info["Route_type"]
     return df
@@ -1967,5 +2009,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
