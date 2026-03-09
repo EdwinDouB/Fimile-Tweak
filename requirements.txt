@@ -3,4 +3,3 @@ requests
 pandas
 pymysql
 xlsxwriter
-python-dotenv>=1.0.0
