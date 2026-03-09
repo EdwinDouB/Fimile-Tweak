@@ -988,7 +988,8 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
             .isin({"1", "true", "yes", "y"})
         )
 
-    lost_mask_base = candidate_mask_base & (~immature_mask_base) & (~customer_service_mask_base)
+    delivered_anytime_mask_base = scanned_base["delivered_dt"].notna()
+    lost_mask_base = candidate_mask_base & (~immature_mask_base) & (~customer_service_mask_base) & (~delivered_anytime_mask_base)
 
     candidate_mask = pd.Series(False, index=df.index)
     candidate_mask.loc[scanned_base.index] = candidate_mask_base.to_numpy()
@@ -2329,6 +2330,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
