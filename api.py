@@ -3,6 +3,9 @@ import requests
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # API configuration comes from code/env only (not exposed in UI).
 API_URL_TEMPLATE = os.getenv(
     "KPI_API_URL_TEMPLATE",

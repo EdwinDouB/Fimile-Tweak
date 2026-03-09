@@ -2,6 +2,9 @@ from utils import *
 import streamlit as st
 from datetime import date
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # ---- MySQL (read from env; DO NOT hardcode secrets) ----
 MYSQL_HOST = read_config("MYSQL_HOST", "")
 MYSQL_PORT = int(read_config("MYSQL_PORT", "3306"))

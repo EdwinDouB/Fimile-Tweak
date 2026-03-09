@@ -76,7 +76,7 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
     lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
     scanned_base = lost_analysis["scanned_base"]
     scanned_base["lost"] = lost_analysis["lost_mask"].loc[scanned_base.index].astype(int)
-    monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("trakcing_id", "count"), lost=("lost", "sum"))
+    monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("tracking_id", "count"), lost=("lost", "sum"))
     lost_total = int(monthly_lost["lost"].sum()) if not monthly_lost.empty else 0
     scanned_total = int(monthly_lost["total"].sum()) if not monthly_lost.empty else 0
     metrics.append(

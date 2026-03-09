@@ -385,7 +385,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     delivered_time = to_local_dt(event_ts(success_evt) if success_evt else None)
 
     row: dict[str, str] = {
-        "trakcing_id": tracking_id,
+        "tracking_id": tracking_id,
         "shipperName": str(
             shipper_name
             or payload.get("shipperName")
@@ -430,7 +430,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
 
 def empty_row(tracking_id: str) -> dict[str, str]:
     row = {col: "" for col in OUTPUT_COLUMNS}
-    row["trakcing_id"] = tracking_id
+    row["tracking_id"] = tracking_id
     return row
 
 def normalize_state(state: str) -> str:
@@ -490,7 +490,7 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
         "sender_city",
         "sender_address",
         "out_for_delivery_time",
-        "trakcing_id",
+        "tracking_id",
     ]
 
     output_columns = [
@@ -528,7 +528,7 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
     summary = (
         work_df.groupby(["_state_group", "sender_company", "shipping_address"], as_index=False)
         .agg(
-            package_count=("trakcing_id", "count"),
+            package_count=("tracking_id", "count"),
         )
         .sort_values(
             by=["_state_group", "sender_company", "package_count", "shipping_address"],
@@ -552,7 +552,7 @@ def build_invalid_route_summary(df: pd.DataFrame) -> pd.DataFrame:
         | df["Hub"].fillna("").astype(str).str.strip().eq("")
         | df["Contractor"].fillna("").astype(str).str.strip().eq("")
     )
-    invalid_df = df.loc[invalid_mask, ["trakcing_id", "Route_name"]].copy()
+    invalid_df = df.loc[invalid_mask, ["tracking_id", "Route_name"]].copy()
     if invalid_df.empty:
         return invalid_df
 
@@ -561,8 +561,8 @@ def build_invalid_route_summary(df: pd.DataFrame) -> pd.DataFrame:
     grouped = (
         invalid_df.groupby("Route_name", dropna=False)
         .agg(
-            tracking_count=("trakcing_id", "count"),
-            tracking_ids=("trakcing_id", lambda s: ", ".join(s.astype(str).head(5))),
+            tracking_count=("tracking_id", "count"),
+            tracking_ids=("tracking_id", lambda s: ", ".join(s.astype(str).head(5))),
         )
         .reset_index()
         .sort_values(by=["tracking_count", "Route_name"], ascending=[False, True])

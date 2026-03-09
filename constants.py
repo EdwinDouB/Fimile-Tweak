@@ -1,6 +1,6 @@
 
 OUTPUT_COLUMNS = [
-    "trakcing_id",
+    "tracking_id",
     "Region",
     "State",
     "shipperName",

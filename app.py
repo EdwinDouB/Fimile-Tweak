@@ -27,7 +27,7 @@ def render_compliance_section(title: str, delivered_df: pd.DataFrame, state_key_
     header_cols[3].markdown(f"**{tr('compliant')}**")
 
     for idx, row in delivered_df.iterrows():
-        tracking_id = str(row.get("trakcing_id") or "")
+        tracking_id = str(row.get("tracking_id") or "")
         delivered_time = str(row.get("delivered_time") or "")
         compliant = st.session_state["pod_compliance_map"].get(tracking_id, False)
 
@@ -93,8 +93,8 @@ def _append_delivery_breakdown_rows(
         row[f"<{threshold}h妥投率"] = rate(hit_count, total_count)
 
     sample_tracking_ids = (
-        source_df["trakcing_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().head(8).tolist()
-        if "trakcing_id" in source_df.columns
+        source_df["tracking_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().head(8).tolist()
+        if "tracking_id" in source_df.columns
         else []
     )
     row["调试运单号示例"] = ", ".join(sample_tracking_ids)
@@ -274,7 +274,7 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     delivered_detail_df = non_pickup_df.loc[
         non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
         [
-            "trakcing_id",
+            "tracking_id",
             "Region",
             "State",
             "shipperName",
@@ -417,7 +417,7 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     lost_detail_df = result_df.loc[
         lost_condition,
         [
-            "trakcing_id",
+            "tracking_id",
             "Region",
             "State",
             "shipperName",
@@ -887,7 +887,7 @@ def main() -> None:
 
         compliance_map: dict[str, bool] = {}
         for _, row in result_df.iterrows():
-            tracking_id = str(row.get("trakcing_id") or "")
+            tracking_id = str(row.get("tracking_id") or "")
             if not tracking_id:
                 continue
             compliance_map[tracking_id] = auto_is_pod_compliant(row)
@@ -1086,7 +1086,7 @@ def main() -> None:
             st.info(tr("pickup_empty"))
         else:
             pickup_display_cols = [
-                "trakcing_id",
+                "tracking_id",
                 "Region",
                 "State",
                 "Driver",
@@ -1108,7 +1108,7 @@ def main() -> None:
         delivered_df = non_pickup_filtered_df[non_pickup_filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
         if not delivered_df.empty:
             delivered_df["_delivered_dt"] = pd.to_datetime(delivered_df["delivered_time"], errors="coerce")
-            delivered_df = delivered_df.sort_values(by=["_delivered_dt", "trakcing_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
+            delivered_df = delivered_df.sort_values(by=["_delivered_dt", "tracking_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         export_df = build_export_df(filtered_df)

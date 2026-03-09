@@ -93,7 +93,7 @@ def read_uploaded_ids(uploaded_file) -> list[str]:
     if df.empty:
         return []
 
-    preferred = [c for c in df.columns if str(c).lower() in {"tracking_id", "trackingid", "trakcing_id"}]
+    preferred = [c for c in df.columns if str(c).lower() in {"tracking_id", "trackingid", "tracking_id"}]
     if preferred:
         series = df[preferred[0]].dropna()
         return series.astype(str).tolist()
