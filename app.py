@@ -44,18 +44,20 @@ def render_percentage_pie(
     title: str,
     hit_count: int,
     total_count: int,
-    hit_label: str = "达标",
-    miss_label: str = "未达标",
+    hit_label: str = "",
+    miss_label: str = "",
     chart_key: str | None = None,
     container: Any | None = None,
 ) -> None:
     target = container or st
     if total_count <= 0:
-        target.info(f"{title}：暂无可用数据")
+        target.info(tr("no_data_for_chart", title=title))
         return
 
     miss_count = max(total_count - hit_count, 0)
-    chart_df = pd.DataFrame({"分类": [hit_label, miss_label], "数量": [hit_count, miss_count]})
+    final_hit_label = hit_label or tr("success_count")
+    final_miss_label = miss_label or tr("fail_count")
+    chart_df = pd.DataFrame({"分类": [final_hit_label, final_miss_label], "数量": [hit_count, miss_count]})
     chart_df = chart_df[chart_df["数量"] > 0]
     chart_df["占比"] = (chart_df["数量"] / total_count).map(lambda x: f"{x:.2%}")
 
@@ -75,7 +77,7 @@ def render_percentage_pie(
             },
         },
         use_container_width=True,
-        key=chart_key or f"pie_{title}_{hit_count}_{total_count}_{hit_label}_{miss_label}",
+        key=chart_key or f"pie_{title}_{hit_count}_{total_count}_{final_hit_label}_{final_miss_label}",
     )
 
 def _append_delivery_breakdown_rows(
@@ -165,49 +167,49 @@ def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     st.markdown(f"#### {tr('compact_title')}")
     c1, c2, c3 = st.columns(3)
     if delivered_24h:
-        c1.metric("24小时妥投率", f"{delivered_24h['占比']:.2%}", f"{delivered_24h['命中']}/{delivered_24h['总数']}")
+        c1.metric(tr("metric_delivered_24h"), f"{delivered_24h['占比']:.2%}", f"{delivered_24h['命中']}/{delivered_24h['总数']}")
         render_percentage_pie(
-            title="24小时妥投占比",
+            title=tr("chart_delivered_24h"),
             hit_count=int(delivered_24h["命中"]),
             total_count=int(delivered_24h["总数"]),
-            hit_label="<24h妥投",
-            miss_label=">=24h或未妥投",
+            hit_label=tr("label_delivered_hit", threshold=24),
+            miss_label=tr("label_delivered_miss", threshold=24),
             chart_key="compact_delivered_24h",
             container=c1,
         )
     else:
-        c1.metric("24小时妥投率", "0.00%", "0/0")
-        c1.info("24小时妥投占比：暂无可用数据")
+        c1.metric(tr("metric_delivered_24h"), "0.00%", "0/0")
+        c1.info(tr("no_data_for_chart", title=tr("chart_delivered_24h")))
 
     if scan_24h:
-        c2.metric("24小时上网率", f"{scan_24h['占比']:.2%}", f"{scan_24h['命中']}/{scan_24h['总数']}")
+        c2.metric(tr("metric_scan_24h"), f"{scan_24h['占比']:.2%}", f"{scan_24h['命中']}/{scan_24h['总数']}")
         render_percentage_pie(
-            title="24小时上网占比",
+            title=tr("chart_scan_24h"),
             hit_count=int(scan_24h["命中"]),
             total_count=int(scan_24h["总数"]),
-            hit_label="<24h上网",
-            miss_label=">=24h或未上网",
+            hit_label=tr("label_scan_hit", threshold=24),
+            miss_label=tr("label_scan_miss", threshold=24),
             chart_key="compact_scan_24h",
             container=c2,
         )
     else:
-        c2.metric("24小时上网率", "0.00%", "0/0")
-        c2.info("24小时上网占比：暂无可用数据")
+        c2.metric(tr("metric_scan_24h"), "0.00%", "0/0")
+        c2.info(tr("no_data_for_chart", title=tr("chart_scan_24h")))
 
     if lost_metric:
-        c3.metric("丢包率", f"{lost_metric['占比']:.2%}", f"{lost_metric['命中']}/{lost_metric['总数']}")
+        c3.metric(tr("metric_lost_rate"), f"{lost_metric['占比']:.2%}", f"{lost_metric['命中']}/{lost_metric['总数']}")
         render_percentage_pie(
-            title="丢包占比",
+            title=tr("chart_lost"),
             hit_count=int(lost_metric["命中"]),
             total_count=int(lost_metric["总数"]),
-            hit_label="丢包",
-            miss_label="未丢包",
+            hit_label=tr("label_lost_hit"),
+            miss_label=tr("label_lost_miss"),
             chart_key="compact_lost_rate",
             container=c3,
         )
     else:
-        c3.metric("丢包率", "0.00%", "0/0")
-        c3.info("丢包占比：暂无可用数据")
+        c3.metric(tr("metric_lost_rate"), "0.00%", "0/0")
+        c3.info(tr("no_data_for_chart", title=tr("chart_lost")))
 
 def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
     chart_df = result_df.copy()
@@ -219,7 +221,7 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         chart_df[chart_df["_created_date"].notna()]
         .groupby("_created_date")
         .size()
-        .rename("包裹总数")
+        .rename(tr("line_count_col"))
         .reset_index()
         .sort_values("_created_date")
     )
@@ -227,7 +229,7 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         chart_df[chart_df["_delivered_date"].notna()]
         .groupby("_delivered_date")
         .size()
-        .rename("包裹总数")
+        .rename(tr("line_count_col"))
         .reset_index()
         .sort_values("_delivered_date")
     )
@@ -235,7 +237,7 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         chart_df[chart_df["_created_date"].notna()]
         .groupby("_created_date")["_evaluation_weight"]
         .sum()
-        .rename("评价重量")
+        .rename(tr("line_eval_col"))
         .reset_index()
         .sort_values("_created_date")
     )
@@ -246,20 +248,20 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         if created_count_df.empty:
             st.info(tr("kpi_empty"))
         else:
-            st.line_chart(created_count_df.set_index("_created_date")["包裹总数"])
+            st.line_chart(created_count_df.set_index("_created_date")[tr("line_count_col")])
 
     with c2:
         st.markdown(f"#### {tr('daily_delivered_chart')}")
         if delivered_count_df.empty:
             st.info(tr("kpi_empty"))
         else:
-            st.line_chart(delivered_count_df.set_index("_delivered_date")["包裹总数"])
+            st.line_chart(delivered_count_df.set_index("_delivered_date")[tr("line_count_col")])
 
     st.markdown(f"#### {tr('daily_eval_weight_chart')}")
     if evaluation_weight_df.empty:
         st.info(tr("eval_weight_empty"))
     else:
-        st.line_chart(evaluation_weight_df.set_index("_created_date")["评价重量"])
+        st.line_chart(evaluation_weight_df.set_index("_created_date")[tr("line_eval_col")])
 
 def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     st.subheader(tr("kpi_title"))
@@ -301,14 +303,14 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         render_compact_kpi_row(kpi_payload)
         selected_eval_weight = calculate_package_evaluation_weight(result_df).sum()
         st.metric(tr("compact_eval_weight"), f"{selected_eval_weight:.2f}")
-        st.markdown("##### 24小时妥投率明细")
+        st.markdown(f"##### {tr('delivered_detail_24h')}")
         compact_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24])
         st.dataframe(style_breakdown_rows(compact_breakdown_df), use_container_width=True)
         return kpi_payload
 
     render_daily_kpi_charts(result_df)
 
-    st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
+    st.markdown(f"#### {tr('section_delivered_rate')}")
     detailed_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24, 48, 72])
     st.dataframe(style_breakdown_rows(detailed_breakdown_df), use_container_width=True)
     delivered_detail_df = delivered_detail_df.drop(columns=["ofd_dt", "delivered_dt"])
@@ -326,23 +328,24 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     delivered_cols = st.columns(3)
     delivered_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "24/48/72 小时妥投率（上网 -> 妥投）"]
     for i, metric in enumerate(delivered_metrics):
-        threshold = metric["指标"].replace("<", "").replace("h 妥投率", "")
+        threshold_match = re.search(r"(\d+)", str(metric.get("指标", "")))
+        threshold = threshold_match.group(1) if threshold_match else "24"
         delivered_cols[i].metric(
-            metric["指标"],
+            tr("metric_delivered_24h") if threshold == "24" else f"<{threshold}h Delivery Rate",
             f"{metric['占比']:.2%}",
             f"{metric['命中']}/{metric['总数']}",
         )
         render_percentage_pie(
-            title=f"<{threshold}h 妥投占比",
+            title=tr("chart_delivered_24h") if threshold == "24" else f"<{threshold}h Delivery Share",
             hit_count=int(metric["命中"]),
             total_count=int(metric["总数"]),
-            hit_label=f"<{threshold}h妥投",
-            miss_label=f">={threshold}h或未妥投",
+            hit_label=tr("label_delivered_hit", threshold=threshold),
+            miss_label=tr("label_delivered_miss", threshold=threshold),
             chart_key=f"delivered_{threshold}_{refresh_key}",
             container=delivered_cols[i],
         )
 
-    st.markdown("#### 12/24/48/72 小时上网率（提货 -> 上网）")
+    st.markdown(f"#### {tr('section_scan_rate')}")
     scan_detail_df = result_df[
         [
             "tracking_id",
@@ -379,23 +382,24 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     scan_cols = st.columns(4)
     scan_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "12/24/48/72 小时上网率（提货 -> 上网）"]
     for i, metric in enumerate(scan_metrics):
-        threshold = metric["指标"].replace("<", "").replace("h 上网率", "")
+        threshold_match = re.search(r"(\d+)", str(metric.get("指标", "")))
+        threshold = threshold_match.group(1) if threshold_match else "24"
         scan_cols[i].metric(
-            metric["指标"],
+            tr("metric_scan_24h") if threshold == "24" else f"<{threshold}h Scan Rate",
             f"{metric['占比']:.2%}",
             f"{metric['命中']}/{metric['总数']}",
         )
         render_percentage_pie(
-            title=f"<{threshold}h 上网占比",
+            title=tr("chart_scan_24h") if threshold == "24" else f"<{threshold}h Scan Share",
             hit_count=int(metric["命中"]),
             total_count=int(metric["总数"]),
-            hit_label=f"<{threshold}h上网",
-            miss_label=f">={threshold}h或未上网",
+            hit_label=tr("label_scan_hit", threshold=threshold),
+            miss_label=tr("label_scan_miss", threshold=threshold),
             chart_key=f"scan_{threshold}_{refresh_key}",
             container=scan_cols[i],
         )
 
-    st.markdown("#### 月丢包率（Last Scan 后 120h 内无后续轨迹，且排除未满 120h 运单）")
+    st.markdown(f"#### {tr('section_monthly_lost')}")
     monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
 
     first_scanned_dt = to_datetime_series(result_df, "first_scanned_time")
@@ -432,7 +436,7 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
 
     if kpi_payload.get("has_monthly_lost_data") and monthly_lost_metric:
         metric_cols = st.columns([2, 1])
-        metric_cols[0].metric("整体月丢包率口径", f"{monthly_lost_metric['占比']:.2%}")
+        metric_cols[0].metric(tr("monthly_lost_metric_name"), f"{monthly_lost_metric['占比']:.2%}")
         metric_cols[1].download_button(
             tr("download_lost"),
             data=lost_detail_df.to_csv(index=False).encode("utf-8-sig"),
@@ -442,11 +446,11 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
             disabled=lost_detail_df.empty,
         )
         render_percentage_pie(
-            "丢包占比",
+            tr("chart_lost"),
             int(monthly_lost_metric["命中"]),
             int(monthly_lost_metric["总数"]),
-            hit_label="丢包",
-            miss_label="未丢包",
+            hit_label=tr("label_lost_hit"),
+            miss_label=tr("label_lost_miss"),
             chart_key=f"lost_{refresh_key}",
         )
         st.markdown(f"##### {tr('lost_detail')}")
@@ -457,11 +461,11 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     else:
         st.info(tr("lost_no_scan"))
 
-    st.markdown("#### 月破损率（预留）")
-    st.info("预留区域：月破损率指标待后续开发。")
+    st.markdown(f"#### {tr('section_damage_reserved')}")
+    st.info(tr("reserved_damage_info"))
 
-    st.markdown("#### 拦截成功率（预留）")
-    st.info("预留区域：拦截成功率指标待后续开发。")
+    st.markdown(f"#### {tr('section_intercept_reserved')}")
+    st.info(tr("reserved_intercept_info"))
 
     return kpi_payload
 
@@ -545,7 +549,7 @@ def _require_db_env() -> None:
     if not MYSQL_DATABASE:
         missing.append("MYSQL_DATABASE")
     if missing:
-        raise RuntimeError(f"MySQL 环境变量未配置：{', '.join(missing)}")
+        raise RuntimeError(tr("db_env_missing", fields=", ".join(missing)))
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -559,7 +563,7 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
     try:
         import pymysql  # type: ignore
     except Exception as e:
-        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+        raise RuntimeError(tr("missing_pymysql")) from e
 
     if end_date < start_date:
         return []
@@ -607,7 +611,7 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
     try:
         import pymysql  # type: ignore
     except Exception as e:
-        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+        raise RuntimeError(tr("missing_pymysql")) from e
 
     if not tracking_ids:
         return {}
@@ -665,7 +669,7 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
     try:
         import pymysql  # type: ignore
     except Exception as e:
-        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+        raise RuntimeError(tr("missing_pymysql")) from e
 
     if not tracking_ids:
         return {}
@@ -718,7 +722,7 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
     return sender_info_map
 
 def main() -> None:
-    st.set_page_config(page_title="Fimile美区运单运营数据分析系统", layout="wide")
+    st.set_page_config(page_title=tr("app_title"), layout="wide")
     st.title(tr("app_title"))
     st.caption(tr("version", version=APP_VERSION))
 
@@ -760,7 +764,7 @@ def main() -> None:
     st.selectbox(
         tr("language_label"),
         options=["zh", "en"],
-        format_func=lambda x: "中文" if x == "zh" else "English",
+        format_func=lambda x: "Chinese" if x == "zh" else "English",
         key="language",
     )
 
