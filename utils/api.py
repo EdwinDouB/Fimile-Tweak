@@ -3,7 +3,12 @@ import requests
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv(*_args, **_kwargs):
+        return False
+
 load_dotenv()
 
 # API configuration comes from code/env only (not exposed in UI).
