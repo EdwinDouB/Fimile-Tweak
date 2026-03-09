@@ -44,20 +44,20 @@ def render_percentage_pie(
     title: str,
     hit_count: int,
     total_count: int,
-    hit_label: str = "达标",
-    miss_label: str = "未达标",
+    hit_label: str = "Hit",
+    miss_label: str = "Miss",
     chart_key: str | None = None,
     container: Any | None = None,
 ) -> None:
     target = container or st
     if total_count <= 0:
-        target.info(f"{title}：暂无可用数据")
+        target.info(f"{title}: no data available")
         return
 
     miss_count = max(total_count - hit_count, 0)
-    chart_df = pd.DataFrame({"分类": [hit_label, miss_label], "数量": [hit_count, miss_count]})
-    chart_df = chart_df[chart_df["数量"] > 0]
-    chart_df["占比"] = (chart_df["数量"] / total_count).map(lambda x: f"{x:.2%}")
+    chart_df = pd.DataFrame({"Category": [hit_label, miss_label], "Count": [hit_count, miss_count]})
+    chart_df = chart_df[chart_df["Count"] > 0]
+    chart_df["Rate"] = (chart_df["Count"] / total_count).map(lambda x: f"{x:.2%}")
 
     target.caption(title)
     target.vega_lite_chart(
@@ -65,12 +65,12 @@ def render_percentage_pie(
         {
             "mark": {"type": "arc", "outerRadius": 100},
             "encoding": {
-                "theta": {"field": "数量", "type": "quantitative"},
-                "color": {"field": "分类", "type": "nominal"},
+                "theta": {"field": "Count", "type": "quantitative"},
+                "color": {"field": "Category", "type": "nominal"},
                 "tooltip": [
-                    {"field": "分类", "type": "nominal"},
-                    {"field": "数量", "type": "quantitative"},
-                    {"field": "占比", "type": "nominal"},
+                    {"field": "Category", "type": "nominal"},
+                    {"field": "Count", "type": "quantitative"},
+                    {"field": "Rate", "type": "nominal"},
                 ],
             },
         },
@@ -85,34 +85,34 @@ def _append_delivery_breakdown_rows(
     thresholds: list[int],
 ) -> None:
     total_count = len(source_df)
-    row: dict[str, Any] = {"维度": scope_name, "样本数": total_count}
+    row: dict[str, Any] = {"Dimension": scope_name, "Sample Count": total_count}
     for threshold in thresholds:
         hit_col = f"within_{threshold}h"
         hit_count = int(source_df[hit_col].sum()) if hit_col in source_df.columns else 0
-        row[f"<{threshold}h命中"] = hit_count
-        row[f"<{threshold}h妥投率"] = rate(hit_count, total_count)
+        row[f"<{threshold}h Hit"] = hit_count
+        row[f"<{threshold}h Delivery Rate"] = rate(hit_count, total_count)
 
     sample_tracking_ids = (
         source_df["tracking_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().head(8).tolist()
         if "tracking_id" in source_df.columns
         else []
     )
-    row["调试运单号示例"] = ", ".join(sample_tracking_ids)
+    row["Sample Tracking IDs"] = ", ".join(sample_tracking_ids)
     rows.append(row)
 
 def style_breakdown_rows(table_df: pd.DataFrame) -> Any:
-    if table_df.empty or "维度" not in table_df.columns:
+    if table_df.empty or "Dimension" not in table_df.columns:
         return table_df
 
     level_colors = {
-        0: "#f3f4f6",  # 总体
-        1: "#dbeafe",  # 美西/美东
-        2: "#e0f2fe",  # HUB
-        3: "#ecfccb",  # Contractor
+        0: "#f3f4f6",
+        1: "#dbeafe",
+        2: "#e0f2fe",
+        3: "#ecfccb",
     }
 
     def _style_row(row: pd.Series) -> list[str]:
-        dimension_name = str(row.get("维度", ""))
+        dimension_name = str(row.get("Dimension", ""))
         leading_spaces = len(dimension_name) - len(dimension_name.lstrip(" "))
         indent_level = min(3, leading_spaces // 2)
         color = level_colors.get(indent_level, "#ffffff")
@@ -123,33 +123,33 @@ def style_breakdown_rows(table_df: pd.DataFrame) -> Any:
 
 def build_delivery_breakdown_table(delivered_detail_df: pd.DataFrame, thresholds: list[int]) -> pd.DataFrame:
     if delivered_detail_df.empty:
-        return pd.DataFrame(columns=["维度", "样本数"])
+        return pd.DataFrame(columns=["Dimension", "Sample Count"])
 
     source_df = delivered_detail_df.copy()
     source_df["region_norm"] = source_df["Region"].apply(normalize_region)
 
     rows: list[dict[str, Any]] = []
-    _append_delivery_breakdown_rows(rows, "总体", source_df, thresholds)
+    _append_delivery_breakdown_rows(rows, "Overall", source_df, thresholds)
 
-    for region_code, region_name in [("WE", "美西"), ("EA", "美东")]:
+    for region_code, region_name in [("WE", "West"), ("EA", "East")]:
         region_df = source_df[source_df["region_norm"] == region_code]
         _append_delivery_breakdown_rows(rows, region_name, region_df, thresholds)
         if region_df.empty:
             continue
 
-        for hub_name in sorted(region_df["Hub"].fillna("未知Hub").astype(str).str.strip().replace("", "未知Hub").unique()):
-            hub_df = region_df[region_df["Hub"].fillna("未知Hub").astype(str).str.strip().replace("", "未知Hub") == hub_name]
+        for hub_name in sorted(region_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub").unique()):
+            hub_df = region_df[region_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub") == hub_name]
             hub_display_name = format_unknown_dimension_name(hub_name, hub_df)
             _append_delivery_breakdown_rows(rows, f"  {hub_display_name}", hub_df, thresholds)
 
-            contractor_series = hub_df["Contractor"].fillna("未知Contractor").astype(str).str.strip().replace("", "未知Contractor")
+            contractor_series = hub_df["Contractor"].fillna("Unknown Contractor").astype(str).str.strip().replace("", "Unknown Contractor")
             for contractor_name in sorted(contractor_series.unique()):
                 contractor_df = hub_df[contractor_series == contractor_name]
                 contractor_display_name = format_unknown_dimension_name(contractor_name, contractor_df)
                 _append_delivery_breakdown_rows(rows, f"    {contractor_display_name}", contractor_df, thresholds)
 
     table_df = pd.DataFrame(rows)
-    percent_cols = [f"<{threshold}h妥投率" for threshold in thresholds]
+    percent_cols = [f"<{threshold}h Delivery Rate" for threshold in thresholds]
     for col in percent_cols:
         if col in table_df.columns:
             table_df[col] = table_df[col].map(lambda x: f"{x:.2%}")
@@ -158,56 +158,56 @@ def build_delivery_breakdown_table(delivered_detail_df: pd.DataFrame, thresholds
 
 def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     # scan time - created time and check how many hours 
-    delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("指标") == "<24h 妥投率"), None)
-    scan_24h = next((m for m in kpi_payload["metrics"] if m.get("指标") == "<24h 上网率"), None)
-    lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
+    delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("metric") == "<24h delivery rate"), None)
+    scan_24h = next((m for m in kpi_payload["metrics"] if m.get("metric") == "<24h scan rate"), None)
+    lost_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "overall monthly lost rate"), None)
 
     st.markdown(f"#### {tr('compact_title')}")
     c1, c2, c3 = st.columns(3)
     if delivered_24h:
-        c1.metric("24小时妥投率", f"{delivered_24h['占比']:.2%}", f"{delivered_24h['命中']}/{delivered_24h['总数']}")
+        c1.metric("24h Delivery Rate", f"{delivered_24h['rate']:.2%}", f"{delivered_24h['hit']}/{delivered_24h['total']}")
         render_percentage_pie(
-            title="24小时妥投占比",
-            hit_count=int(delivered_24h["命中"]),
-            total_count=int(delivered_24h["总数"]),
-            hit_label="<24h妥投",
-            miss_label=">=24h或未妥投",
+            title="24h Delivery Share",
+            hit_count=int(delivered_24h["hit"]),
+            total_count=int(delivered_24h["total"]),
+            hit_label="<24h delivered",
+            miss_label=">=24h or undelivered",
             chart_key="compact_delivered_24h",
             container=c1,
         )
     else:
-        c1.metric("24小时妥投率", "0.00%", "0/0")
-        c1.info("24小时妥投占比：暂无可用数据")
+        c1.metric("24h Delivery Rate", "0.00%", "0/0")
+        c1.info("24h delivery share: no data available")
 
     if scan_24h:
-        c2.metric("24小时上网率", f"{scan_24h['占比']:.2%}", f"{scan_24h['命中']}/{scan_24h['总数']}")
+        c2.metric("24h Scan Rate", f"{scan_24h['rate']:.2%}", f"{scan_24h['hit']}/{scan_24h['total']}")
         render_percentage_pie(
-            title="24小时上网占比",
-            hit_count=int(scan_24h["命中"]),
-            total_count=int(scan_24h["总数"]),
-            hit_label="<24h上网",
-            miss_label=">=24h或未上网",
+            title="24h Scan Share",
+            hit_count=int(scan_24h["hit"]),
+            total_count=int(scan_24h["total"]),
+            hit_label="<24h scanned",
+            miss_label=">=24h or unscanned",
             chart_key="compact_scan_24h",
             container=c2,
         )
     else:
-        c2.metric("24小时上网率", "0.00%", "0/0")
-        c2.info("24小时上网占比：暂无可用数据")
+        c2.metric("24h Scan Rate", "0.00%", "0/0")
+        c2.info("24h scan share: no data available")
 
     if lost_metric:
-        c3.metric("丢包率", f"{lost_metric['占比']:.2%}", f"{lost_metric['命中']}/{lost_metric['总数']}")
+        c3.metric("Lost Rate", f"{lost_metric['rate']:.2%}", f"{lost_metric['hit']}/{lost_metric['total']}")
         render_percentage_pie(
-            title="丢包占比",
-            hit_count=int(lost_metric["命中"]),
-            total_count=int(lost_metric["总数"]),
-            hit_label="丢包",
-            miss_label="未丢包",
+            title="Lost Share",
+            hit_count=int(lost_metric["hit"]),
+            total_count=int(lost_metric["total"]),
+            hit_label="Lost",
+            miss_label="Not lost",
             chart_key="compact_lost_rate",
             container=c3,
         )
     else:
-        c3.metric("丢包率", "0.00%", "0/0")
-        c3.info("丢包占比：暂无可用数据")
+        c3.metric("Lost Rate", "0.00%", "0/0")
+        c3.info("Lost share: no data available")
 
 def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
     chart_df = result_df.copy()
@@ -219,7 +219,7 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         chart_df[chart_df["_created_date"].notna()]
         .groupby("_created_date")
         .size()
-        .rename("包裹总数")
+        .rename("Package Count")
         .reset_index()
         .sort_values("_created_date")
     )
@@ -227,7 +227,7 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         chart_df[chart_df["_delivered_date"].notna()]
         .groupby("_delivered_date")
         .size()
-        .rename("包裹总数")
+        .rename("Package Count")
         .reset_index()
         .sort_values("_delivered_date")
     )
@@ -235,7 +235,7 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         chart_df[chart_df["_created_date"].notna()]
         .groupby("_created_date")["_evaluation_weight"]
         .sum()
-        .rename("评价重量")
+        .rename("Evaluation Weight")
         .reset_index()
         .sort_values("_created_date")
     )
@@ -246,20 +246,20 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         if created_count_df.empty:
             st.info(tr("kpi_empty"))
         else:
-            st.line_chart(created_count_df.set_index("_created_date")["包裹总数"])
+            st.line_chart(created_count_df.set_index("_created_date")["Package Count"])
 
     with c2:
         st.markdown(f"#### {tr('daily_delivered_chart')}")
         if delivered_count_df.empty:
             st.info(tr("kpi_empty"))
         else:
-            st.line_chart(delivered_count_df.set_index("_delivered_date")["包裹总数"])
+            st.line_chart(delivered_count_df.set_index("_delivered_date")["Package Count"])
 
     st.markdown(f"#### {tr('daily_eval_weight_chart')}")
     if evaluation_weight_df.empty:
         st.info(tr("eval_weight_empty"))
     else:
-        st.line_chart(evaluation_weight_df.set_index("_created_date")["评价重量"])
+        st.line_chart(evaluation_weight_df.set_index("_created_date")["Evaluation Weight"])
 
 def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     st.subheader(tr("kpi_title"))
@@ -301,14 +301,14 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         render_compact_kpi_row(kpi_payload)
         selected_eval_weight = calculate_package_evaluation_weight(result_df).sum()
         st.metric(tr("compact_eval_weight"), f"{selected_eval_weight:.2f}")
-        st.markdown("##### 24小时妥投率明细")
+        st.markdown("##### 24h Delivery Rate Details")
         compact_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24])
         st.dataframe(style_breakdown_rows(compact_breakdown_df), use_container_width=True)
         return kpi_payload
 
     render_daily_kpi_charts(result_df)
 
-    st.markdown("#### 24/48/72 小时妥投率（上网 -> 妥投）")
+    st.markdown("#### 24/48/72h Delivery Rate (Scan -> Delivered)")
     detailed_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24, 48, 72])
     st.dataframe(style_breakdown_rows(detailed_breakdown_df), use_container_width=True)
     delivered_detail_df = delivered_detail_df.drop(columns=["ofd_dt", "delivered_dt"])
@@ -324,25 +324,25 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     )
 
     delivered_cols = st.columns(3)
-    delivered_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "24/48/72 小时妥投率（上网 -> 妥投）"]
+    delivered_metrics = [m for m in kpi_payload["metrics"] if m.get("category") == "delivery_rate_24_48_72"]
     for i, metric in enumerate(delivered_metrics):
-        threshold = metric["指标"].replace("<", "").replace("h 妥投率", "")
+        threshold = metric["metric"].replace("<", "").replace("h delivery rate", "")
         delivered_cols[i].metric(
-            metric["指标"],
-            f"{metric['占比']:.2%}",
-            f"{metric['命中']}/{metric['总数']}",
+            metric["metric"],
+            f"{metric['rate']:.2%}",
+            f"{metric['hit']}/{metric['total']}",
         )
         render_percentage_pie(
-            title=f"<{threshold}h 妥投占比",
-            hit_count=int(metric["命中"]),
-            total_count=int(metric["总数"]),
-            hit_label=f"<{threshold}h妥投",
-            miss_label=f">={threshold}h或未妥投",
+            title=f"<{threshold}h delivery share",
+            hit_count=int(metric["hit"]),
+            total_count=int(metric["total"]),
+            hit_label=f"<{threshold}h delivered",
+            miss_label=f">={threshold}h or undelivered",
             chart_key=f"delivered_{threshold}_{refresh_key}",
             container=delivered_cols[i],
         )
 
-    st.markdown("#### 12/24/48/72 小时上网率（提货 -> 上网）")
+    st.markdown("#### 12/24/48/72h Scan Rate (Pickup -> Scan)")
     scan_detail_df = result_df[
         [
             "tracking_id",
@@ -377,26 +377,26 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     )
 
     scan_cols = st.columns(4)
-    scan_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "12/24/48/72 小时上网率（提货 -> 上网）"]
+    scan_metrics = [m for m in kpi_payload["metrics"] if m.get("category") == "scan_rate_12_24_48_72"]
     for i, metric in enumerate(scan_metrics):
-        threshold = metric["指标"].replace("<", "").replace("h 上网率", "")
+        threshold = metric["metric"].replace("<", "").replace("h scan rate", "")
         scan_cols[i].metric(
-            metric["指标"],
-            f"{metric['占比']:.2%}",
-            f"{metric['命中']}/{metric['总数']}",
+            metric["metric"],
+            f"{metric['rate']:.2%}",
+            f"{metric['hit']}/{metric['total']}",
         )
         render_percentage_pie(
-            title=f"<{threshold}h 上网占比",
-            hit_count=int(metric["命中"]),
-            total_count=int(metric["总数"]),
-            hit_label=f"<{threshold}h上网",
-            miss_label=f">={threshold}h或未上网",
+            title=f"<{threshold}h scan share",
+            hit_count=int(metric["hit"]),
+            total_count=int(metric["total"]),
+            hit_label=f"<{threshold}h scanned",
+            miss_label=f">={threshold}h or unscanned",
             chart_key=f"scan_{threshold}_{refresh_key}",
             container=scan_cols[i],
         )
 
-    st.markdown("#### 月丢包率（Last Scan 后 120h 内无后续轨迹，且排除未满 120h 运单）")
-    monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
+    st.markdown("#### Monthly Lost Rate (no events within 120h after Last Scan; exclude waybills not yet 120h old)")
+    monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "overall monthly lost rate"), None)
 
     first_scanned_dt = to_datetime_series(result_df, "first_scanned_time")
     last_scanned_dt = to_datetime_series(result_df, "last_scanned_time")
@@ -432,7 +432,7 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
 
     if kpi_payload.get("has_monthly_lost_data") and monthly_lost_metric:
         metric_cols = st.columns([2, 1])
-        metric_cols[0].metric("整体月丢包率口径", f"{monthly_lost_metric['占比']:.2%}")
+        metric_cols[0].metric("Overall monthly lost rate", f"{monthly_lost_metric['rate']:.2%}")
         metric_cols[1].download_button(
             tr("download_lost"),
             data=lost_detail_df.to_csv(index=False).encode("utf-8-sig"),
@@ -442,11 +442,11 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
             disabled=lost_detail_df.empty,
         )
         render_percentage_pie(
-            "丢包占比",
-            int(monthly_lost_metric["命中"]),
-            int(monthly_lost_metric["总数"]),
-            hit_label="丢包",
-            miss_label="未丢包",
+            "Lost share",
+            int(monthly_lost_metric["hit"]),
+            int(monthly_lost_metric["total"]),
+            hit_label="Lost",
+            miss_label="Not lost",
             chart_key=f"lost_{refresh_key}",
         )
         st.markdown(f"##### {tr('lost_detail')}")
@@ -457,11 +457,11 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     else:
         st.info(tr("lost_no_scan"))
 
-    st.markdown("#### 月破损率（预留）")
-    st.info("预留区域：月破损率指标待后续开发。")
+    st.markdown("#### Monthly Damage Rate (Reserved)")
+    st.info("Reserved area: monthly damage rate metric to be implemented.")
 
-    st.markdown("#### 拦截成功率（预留）")
-    st.info("预留区域：拦截成功率指标待后续开发。")
+    st.markdown("#### Interception Success Rate (Reserved)")
+    st.info("Reserved area: interception success-rate metric to be implemented.")
 
     return kpi_payload
 
@@ -545,7 +545,7 @@ def _require_db_env() -> None:
     if not MYSQL_DATABASE:
         missing.append("MYSQL_DATABASE")
     if missing:
-        raise RuntimeError(f"MySQL 环境变量未配置：{', '.join(missing)}")
+        raise RuntimeError(f"Missing MySQL environment variables: {', '.join(missing)}")
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -559,7 +559,7 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
     try:
         import pymysql  # type: ignore
     except Exception as e:
-        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+        raise RuntimeError("Missing dependency: pymysql. Please run: pip install pymysql") from e
 
     if end_date < start_date:
         return []
@@ -607,7 +607,7 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
     try:
         import pymysql  # type: ignore
     except Exception as e:
-        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+        raise RuntimeError("Missing dependency: pymysql. Please run: pip install pymysql") from e
 
     if not tracking_ids:
         return {}
@@ -665,7 +665,7 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
     try:
         import pymysql  # type: ignore
     except Exception as e:
-        raise RuntimeError("缺少依赖 pymysql。请先 pip install pymysql") from e
+        raise RuntimeError("Missing dependency: pymysql. Please run: pip install pymysql") from e
 
     if not tracking_ids:
         return {}
@@ -718,7 +718,7 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
     return sender_info_map
 
 def main() -> None:
-    st.set_page_config(page_title="Fimile美区运单运营数据分析系统", layout="wide")
+    st.set_page_config(page_title="Fimile US Shipment Operations Dashboard", layout="wide")
     st.title(tr("app_title"))
     st.caption(tr("version", version=APP_VERSION))
 
@@ -760,7 +760,7 @@ def main() -> None:
     st.selectbox(
         tr("language_label"),
         options=["zh", "en"],
-        format_func=lambda x: "中文" if x == "zh" else "English",
+        format_func=lambda x: tr("language_zh") if x == "zh" else tr("language_en"),
         key="language",
     )
 
