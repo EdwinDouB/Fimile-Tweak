@@ -3,12 +3,7 @@ import requests
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    def load_dotenv(*_args, **_kwargs):
-        return False
-
+from dotenv import load_dotenv
 load_dotenv()
 
 # API configuration comes from code/env only (not exposed in UI).
