@@ -160,9 +160,9 @@ def build_delivery_breakdown_table(delivered_detail_df: pd.DataFrame, thresholds
 
 def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     # scan time - created time and check how many hours 
-    delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("指标") == "<24h 妥投率"), None)
-    scan_24h = next((m for m in kpi_payload["metrics"] if m.get("指标") == "<24h 上网率"), None)
-    lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
+    delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("指标key") == "metric_delivered_threshold" and m.get("threshold") == 24), None)
+    scan_24h = next((m for m in kpi_payload["metrics"] if m.get("指标key") == "metric_scan_threshold" and m.get("threshold") == 24), None)
+    lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标key") == "monthly_lost_metric_name"), None)
 
     st.markdown(f"#### {tr('compact_title')}")
     c1, c2, c3 = st.columns(3)
@@ -269,7 +269,11 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         st.info(tr("kpi_empty"))
         return {"metrics": [], "charts": [], "has_monthly_lost_data": False, "monthly_lost": pd.DataFrame()}
 
-    kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
+    kpi_payload = build_kpi_report_payload(
+        result_df,
+        fetch_reference_time=fetch_reference_time,
+        lang=st.session_state.get("language", "zh"),
+    )
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
     non_pickup_df, _ = split_pickup_routes(result_df)
@@ -326,17 +330,17 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     )
 
     delivered_cols = st.columns(3)
-    delivered_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "24/48/72 小时妥投率（上网 -> 妥投）"]
+    delivered_metrics = [m for m in kpi_payload["metrics"] if m.get("分类key") == "section_delivered_rate"]
     for i, metric in enumerate(delivered_metrics):
         threshold_match = re.search(r"(\d+)", str(metric.get("指标", "")))
         threshold = threshold_match.group(1) if threshold_match else "24"
         delivered_cols[i].metric(
-            tr("metric_delivered_24h") if threshold == "24" else f"<{threshold}h Delivery Rate",
+            tr("metric_delivered_24h") if threshold == "24" else tr("metric_delivered_threshold", threshold=threshold),
             f"{metric['占比']:.2%}",
             f"{metric['命中']}/{metric['总数']}",
         )
         render_percentage_pie(
-            title=tr("chart_delivered_24h") if threshold == "24" else f"<{threshold}h Delivery Share",
+            title=tr("chart_delivered_24h") if threshold == "24" else tr("chart_delivered_threshold", threshold=threshold),
             hit_count=int(metric["命中"]),
             total_count=int(metric["总数"]),
             hit_label=tr("label_delivered_hit", threshold=threshold),
@@ -380,17 +384,17 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     )
 
     scan_cols = st.columns(4)
-    scan_metrics = [m for m in kpi_payload["metrics"] if m.get("分类") == "12/24/48/72 小时上网率（提货 -> 上网）"]
+    scan_metrics = [m for m in kpi_payload["metrics"] if m.get("分类key") == "section_scan_rate"]
     for i, metric in enumerate(scan_metrics):
         threshold_match = re.search(r"(\d+)", str(metric.get("指标", "")))
         threshold = threshold_match.group(1) if threshold_match else "24"
         scan_cols[i].metric(
-            tr("metric_scan_24h") if threshold == "24" else f"<{threshold}h Scan Rate",
+            tr("metric_scan_24h") if threshold == "24" else tr("metric_scan_threshold", threshold=threshold),
             f"{metric['占比']:.2%}",
             f"{metric['命中']}/{metric['总数']}",
         )
         render_percentage_pie(
-            title=tr("chart_scan_24h") if threshold == "24" else f"<{threshold}h Scan Share",
+            title=tr("chart_scan_24h") if threshold == "24" else tr("chart_scan_threshold", threshold=threshold),
             hit_count=int(metric["命中"]),
             total_count=int(metric["总数"]),
             hit_label=tr("label_scan_hit", threshold=threshold),
@@ -400,7 +404,7 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         )
 
     st.markdown(f"#### {tr('section_monthly_lost')}")
-    monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标") == "整体月丢包率口径"), None)
+    monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("指标key") == "monthly_lost_metric_name"), None)
 
     first_scanned_dt = to_datetime_series(result_df, "first_scanned_time")
     last_scanned_dt = to_datetime_series(result_df, "last_scanned_time")
@@ -1142,3 +1146,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
