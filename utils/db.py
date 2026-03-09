@@ -2,7 +2,12 @@ from utils.utils import *
 import streamlit as st
 from datetime import date
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    def load_dotenv(*_args, **_kwargs):
+        return False
+
 load_dotenv()
 
 # ---- MySQL (read from env; DO NOT hardcode secrets) ----
