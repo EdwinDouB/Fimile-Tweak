@@ -1,22 +1,11 @@
 from datetime import datetime
 from utils.utils import to_datetime_series, rate
 from utils.routes import split_pickup_routes, build_lost_package_analysis
-from utils.constants import I18N
 from typing import Any
 import pandas as pd
 import io 
 
-def build_kpi_report_payload(
-    result_df: pd.DataFrame,
-    fetch_reference_time: datetime | None = None,
-    lang: str = "zh",
-) -> dict[str, Any]:
-    locale = I18N.get(lang, I18N["zh"])
-
-    def t(key: str, **kwargs: Any) -> str:
-        template = locale.get(key, I18N["zh"].get(key, key))
-        return template.format(**kwargs)
-
+def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     df = result_df.copy()
     df["created_dt"] = to_datetime_series(df, "created_time")
     df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
@@ -39,17 +28,14 @@ def build_kpi_report_payload(
         within = ofd_base[
             ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)
         ]
-        metric_name = t("metric_delivered_threshold", threshold=threshold)
+        metric_name = f"<{threshold}h 妥投率"
         hit_count = len(within)
         total_count = len(ofd_base)
         miss_count = max(total_count - hit_count, 0)
         metrics.append(
             {
-                "分类": t("section_delivered_rate"),
-                "分类key": "section_delivered_rate",
+                "分类": "24/48/72 小时妥投率（上网 -> 妥投）",
                 "指标": metric_name,
-                "指标key": "metric_delivered_threshold",
-                "threshold": threshold,
                 "命中": hit_count,
                 "总数": total_count,
                 "占比": rate(hit_count, total_count),
@@ -57,8 +43,8 @@ def build_kpi_report_payload(
         )
         chart_rows.extend(
             [
-                {"图表": metric_name, "分类": t("label_delivered_hit", threshold=threshold), "数量": hit_count, "占比": rate(hit_count, total_count)},
-                {"图表": metric_name, "分类": t("label_delivered_miss", threshold=threshold), "数量": miss_count, "占比": rate(miss_count, total_count)},
+                {"图表": metric_name, "分类": f"<{threshold}h妥投", "数量": hit_count, "占比": rate(hit_count, total_count)},
+                {"图表": metric_name, "分类": f">={threshold}h或未妥投", "数量": miss_count, "占比": rate(miss_count, total_count)},
             ]
         )
 
@@ -68,16 +54,13 @@ def build_kpi_report_payload(
         within = df[
             df["first_scanned_dt"].notna() & (df["created_to_scan_hours"] >= 0) & (df["created_to_scan_hours"] < threshold)
         ]
-        metric_name = t("metric_scan_threshold", threshold=threshold)
+        metric_name = f"<{threshold}h 上网率"
         hit_count = len(within)
         miss_count = max(total_count - hit_count, 0)
         metrics.append(
             {
-                "分类": t("section_scan_rate"),
-                "分类key": "section_scan_rate",
+                "分类": "12/24/48/72 小时上网率（提货 -> 上网）",
                 "指标": metric_name,
-                "指标key": "metric_scan_threshold",
-                "threshold": threshold,
                 "命中": hit_count,
                 "总数": total_count,
                 "占比": rate(hit_count, total_count),
@@ -85,18 +68,8 @@ def build_kpi_report_payload(
         )
         chart_rows.extend(
             [
-                {
-                    "图表": metric_name,
-                    "分类": t("label_scan_hit", threshold=threshold),
-                    "数量": hit_count,
-                    "占比": rate(hit_count, total_count),
-                },
-                {
-                    "图表": metric_name,
-                    "分类": t("label_scan_miss", threshold=threshold),
-                    "数量": miss_count,
-                    "占比": rate(miss_count, total_count),
-                },
+                {"图表": metric_name, "分类": f"<{threshold}h上网", "数量": hit_count, "占比": rate(hit_count, total_count)},
+                {"图表": metric_name, "分类": f">={threshold}h或未上网", "数量": miss_count, "占比": rate(miss_count, total_count)},
             ]
         )
 
@@ -108,10 +81,8 @@ def build_kpi_report_payload(
     scanned_total = int(monthly_lost["total"].sum()) if not monthly_lost.empty else 0
     metrics.append(
         {
-            "分类": t("section_monthly_lost"),
-            "分类key": "section_monthly_lost",
-            "指标": t("monthly_lost_metric_name"),
-            "指标key": "monthly_lost_metric_name",
+            "分类": "月丢包率（Last Scan 120h 口径）",
+            "指标": "整体月丢包率口径",
             "命中": lost_total,
             "总数": scanned_total,
             "占比": rate(lost_total, scanned_total),
@@ -119,10 +90,10 @@ def build_kpi_report_payload(
     )
     chart_rows.extend(
         [
-            {"图表": t("monthly_lost_metric_name"), "分类": t("label_lost_hit"), "数量": lost_total, "占比": rate(lost_total, scanned_total)},
+            {"图表": "整体月丢包率口径", "分类": "丢包", "数量": lost_total, "占比": rate(lost_total, scanned_total)},
             {
-                "图表": t("monthly_lost_metric_name"),
-                "分类": t("label_lost_miss"),
+                "图表": "整体月丢包率口径",
+                "分类": "未丢包",
                 "数量": max(scanned_total - lost_total, 0),
                 "占比": rate(max(scanned_total - lost_total, 0), scanned_total),
             },
