@@ -81,6 +81,24 @@ def parse_route(description: Any) -> str:
         return match.group(1).strip("\"' \t-:：")
     return ""
 
+def latest_route_assignment(events: list[dict[str, Any]]) -> str:
+    candidates: list[tuple[int, int, str]] = []
+    for idx, event in enumerate(events):
+        route_name = parse_route(event_description(event))
+        if not route_name:
+            continue
+
+        ts = event_ts(event)
+        sort_ts = ts if ts is not None else -1
+        candidates.append((sort_ts, idx, route_name))
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    return candidates[-1][2]
+
+
 
 def extract_route_parts(route_name: str) -> list[str]:
     text = str(route_name or "").strip()
@@ -465,7 +483,8 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     scan_hub = infer_hub_from_pre_ofd_scan(events, ofd_evt)
     fail_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
     success_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
-
+    latest_route = latest_route_assignment(events)
+    
     created_time = to_local_dt(event_ts(created_evt) if created_evt else None)
     first_scanned_time = to_local_dt(event_ts(first_scanned_evt) if first_scanned_evt else None)
     last_scanned_time = to_local_dt(event_ts(last_scanned_evt) if last_scanned_evt else None)
@@ -494,7 +513,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "delivered_time": fmt_dt(delivered_time),
         "success_route": parse_route(event_description(success_evt)) if success_evt else "",
         "ofd_route": parse_route(event_description(ofd_evt)) if ofd_evt else "",
-        "Route_name": "",
+        "Route_name": latest_route,
         "创建到入库时间": diff_hours(first_scanned_time, created_time),
         "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
         "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
@@ -558,6 +577,13 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["Route_type"] = ""
 
     for idx, row in df.iterrows():
+        route_name = str(
+            row.get("Route_name")
+            or row.get("success_route")
+            or row.get("failed_route")
+            or row.get("ofd_route")
+            or ""
+        ).strip()
         route_name = str(row.get("success_route") or row.get("failed_route") or row.get("ofd_route") or "").strip()
         fallback_state = str(row.get("State") or row.get("sender_province") or "")
         route_info = parse_route_identity(route_name, fallback_state=fallback_state)
