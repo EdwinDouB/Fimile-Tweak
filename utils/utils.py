@@ -1,6 +1,7 @@
 
 
 import os
+from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 
@@ -42,6 +43,39 @@ def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.to_datetime(pd.Series([pd.NaT] * len(df)), errors="coerce")
     return pd.to_datetime(df[column], errors="coerce")
+
+
+
+def to_local_dt(ts_millis: int | float | None, local_tz=timezone.utc) -> datetime | None:
+    """Convert unix timestamp in milliseconds to timezone-aware datetime."""
+    if ts_millis is None:
+        return None
+
+    try:
+        seconds = float(ts_millis) / 1000.0
+    except (TypeError, ValueError):
+        return None
+
+    try:
+        return datetime.fromtimestamp(seconds, tz=timezone.utc).astimezone(local_tz)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def fmt_dt(value: datetime | None) -> str:
+    """Format datetime for exports."""
+    if value is None:
+        return ""
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def diff_hours(end_time: datetime | None, start_time: datetime | None) -> str:
+    """Return (end-start) hour difference as a numeric string with 2 decimals."""
+    if end_time is None or start_time is None:
+        return ""
+    delta_hours = (end_time - start_time).total_seconds() / 3600.0
+    return f"{delta_hours:.2f}"
+
 import base64
 import json
 import requests
