@@ -149,6 +149,13 @@ def looks_like_driver_token(token: str) -> bool:
     text = str(token or "").strip().upper()
     return bool(re.fullmatch(r"[A-Z]{4,}", text))
 
+def looks_like_route_date_token(token: str) -> bool:
+    text = str(token or "").strip()
+    if not text:
+        return False
+    return bool(re.fullmatch(r"\d{1,2}[/\-.]\d{1,2}", text))
+
+
 
 def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str, str]:
     """Parse route format: HUB-路区号-日期-DSP-司机名.
@@ -169,17 +176,31 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     driver = ""
     contractor_idx = -1
 
-    for idx in range(len(parts) - 1, 0, -1):
-        raw_candidate = parts[idx].strip().upper()
+    date_idx = -1
+    for idx, token in enumerate(parts):
+        if looks_like_route_date_token(token):
+            date_idx = idx
+            break
+
+    if date_idx >= 0 and date_idx + 1 < len(parts):
+        raw_candidate = parts[date_idx + 1].strip().upper()
         candidate = re.sub(r"[^A-Za-z0-9]", "", raw_candidate)
-        if "/" in raw_candidate:
-            continue
-        if idx == len(parts) - 1 and len(parts) >= 3 and looks_like_driver_token(candidate):
-            continue
         if is_valid_contractor_name(candidate):
             contractor = candidate
-            contractor_idx = idx
-            break
+            contractor_idx = date_idx + 1
+
+    if contractor_idx < 0:
+        for idx in range(len(parts) - 1, 0, -1):
+            raw_candidate = parts[idx].strip().upper()
+            candidate = re.sub(r"[^A-Za-z0-9]", "", raw_candidate)
+            if "/" in raw_candidate:
+                continue
+            if idx == len(parts) - 1 and len(parts) >= 3 and looks_like_driver_token(candidate):
+                continue
+            if is_valid_contractor_name(candidate):
+                contractor = candidate
+                contractor_idx = idx
+                break
 
     if contractor_idx >= 0:
         driver_tokens = [token.strip() for token in parts[contractor_idx + 1 :] if token.strip()]
