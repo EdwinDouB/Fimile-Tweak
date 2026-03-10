@@ -1,10 +1,43 @@
 import os
+import re
 from datetime import datetime, timezone
 import pandas as pd
 import streamlit as st
 from typing import Any
 
-from utils.constants import * 
+from utils.constants import *
+
+def _extract_key_from_blob(raw_text: str, name: str) -> str | None:
+    """Extract KEY=VALUE from a multi-line blob."""
+    pattern = re.compile(rf"(?m)^\s*{re.escape(name)}\s*=\s*(.+?)\s*$")
+    match = pattern.search(raw_text)
+    if not match:
+        return None
+
+    value = match.group(1).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
+        value = value[1:-1]
+    return value or None
+
+
+def _read_streamlit_secret(name: str) -> str | None:
+    try:
+        secret_value = st.secrets.get(name)
+        if secret_value not in (None, ""):
+            return str(secret_value)
+
+        # Backward compatibility for incorrectly pasted secrets like:
+        # KEY1="..."\nKEY2="..." in a single secret entry.
+        for _, candidate in st.secrets.items():
+            if not isinstance(candidate, str):
+                continue
+            extracted = _extract_key_from_blob(candidate, name)
+            if extracted not in (None, ""):
+                return extracted
+    except Exception:
+        return None
+
+    return None
 
 def read_config(name: str, default: str = "") -> str:
     """Read config from env first, then Streamlit secrets."""
@@ -12,10 +45,7 @@ def read_config(name: str, default: str = "") -> str:
     if value not in (None, ""):
         return value
 
-    try:
-        secret_value = st.secrets.get(name)
-    except Exception:
-        secret_value = None
+    secret_value = _read_streamlit_secret(name)
 
     if secret_value in (None, ""):
         return default
