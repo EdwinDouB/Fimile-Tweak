@@ -7,7 +7,10 @@ import pandas as pd
 import io 
 
 def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
+
     df = result_df.copy()
+
+    # converting dates & times
     df["created_dt"] = to_datetime_series(df, "created_time")
     df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
     df["last_scanned_dt"] = to_datetime_series(df, "last_scanned_time")
@@ -16,15 +19,19 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
     df["delivered_dt"] = to_datetime_series(df, "delivered_time")
     df["month"] = df["created_dt"].dt.to_period("M").astype(str)
     df.loc[df["month"] == "NaT", "month"] = "Unknown"
+
+    # finding the packages we are dropping off
     non_pickup_df, _ = split_pickup_routes(df)
 
     metrics: list[dict[str, Any]] = []
     chart_rows: list[dict[str, Any]] = []
 
+    # calculating delivered - out for delivery 
     non_pickup_df["ofd_to_delivered_hours"] = (non_pickup_df["delivered_dt"] - non_pickup_df["ofd_dt"]).dt.total_seconds() / 3600
     ofd_present_mask = non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne("")
     ofd_base = non_pickup_df[ofd_present_mask].copy()
 
+    # for 24, 48, and 72 hours, calculate wether or not the package is delivered & add it to metrics dataframe
     for threshold in [24, 48, 72]:
         within = ofd_base[
             ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)
@@ -49,6 +56,7 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
             ]
         )
 
+    # find the time between the first scan and the created time, and add it to the metrics chart
     df["created_to_scan_hours"] = (df["first_scanned_dt"] - df["created_dt"]).dt.total_seconds() / 3600
     total_count = len(df)
     for threshold in [12, 24, 48, 72]:
@@ -74,6 +82,7 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
             ]
         )
 
+    # calculate # of packages lost and build a lost package analysis 
     lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
     scanned_base = lost_analysis["scanned_base"]
     scanned_base["lost"] = lost_analysis["lost_mask"].loc[scanned_base.index].astype(int)

@@ -267,6 +267,7 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         st.info(tr("kpi_empty"))
         return {"metrics": [], "charts": [], "has_monthly_lost_data": False, "monthly_lost": pd.DataFrame()}
 
+    # 
     kpi_payload = build_kpi_report_payload(result_df, fetch_reference_time=fetch_reference_time)
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
