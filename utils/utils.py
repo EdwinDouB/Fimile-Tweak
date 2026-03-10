@@ -44,7 +44,31 @@ def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
         return pd.to_datetime(pd.Series([pd.NaT] * len(df)), errors="coerce")
     return pd.to_datetime(df[column], errors="coerce")
 
+def calculate_package_evaluation_weight(df: pd.DataFrame) -> pd.Series:
+    """Return per-package evaluation weight for KPI visualizations.
 
+    Some datasets contain an explicit weight-like column while others don't.
+    When no usable weight column exists, each package contributes `1.0` so
+    aggregated evaluation weight remains meaningful and charts stay available.
+    """
+    if df.empty:
+        return pd.Series(dtype="float64")
+
+    weight_columns = [
+        "evaluation_weight",
+        "package_evaluation_weight",
+        "package_weight",
+        "weight",
+    ]
+    for column in weight_columns:
+        if column not in df.columns:
+            continue
+
+        numeric_weight = pd.to_numeric(df[column], errors="coerce")
+        if numeric_weight.notna().any():
+            return numeric_weight.fillna(1.0).clip(lower=0)
+
+    return pd.Series(1.0, index=df.index, dtype="float64")
 
 def to_local_dt(ts_millis: int | float | None, local_tz=timezone.utc) -> datetime | None:
     """Convert unix timestamp in milliseconds to timezone-aware datetime."""
