@@ -39,6 +39,8 @@ HUB_BY_STATE = {
     "NY": "EDS",
     "TX": "HOU",
     "GA": "ATL",
+    "PA": "EDS",
+    "CT": "EDS"
 }
 
 
