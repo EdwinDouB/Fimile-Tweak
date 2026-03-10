@@ -447,6 +447,19 @@ def infer_region_from_state(state: str) -> str:
     normalized_state = normalize_state(state)
     return REGION_BY_STATE.get(normalized_state, "")
 
+def normalize_region(region: str) -> str:
+    region_text = str(region or "").strip().upper()
+    if not region_text:
+        return ""
+
+    compact_region = re.sub(r"[^A-Z]", "", region_text)
+    if compact_region in {"WE", "WEST", "WESTERN"}:
+        return "WE"
+    if compact_region in {"EA", "EAST", "EASTERN"}:
+        return "EA"
+    return region_text
+
+
 
 def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
