@@ -706,6 +706,12 @@ def main() -> None:
     failures: list[dict[str, str]] = st.session_state.get("failures", [])
 
     if result_df is not None:
+        known_hub_states = set(HUB_BY_STATE.keys())
+        state_series = result_df["State"].fillna("").astype(str).str.strip().str.upper()
+        unknown_states = sorted({state for state in state_series if state and state not in known_hub_states})
+        if unknown_states:
+            st.warning(f"发现未配置 HUB 映射的 State：{', '.join(unknown_states)}")
+
         st.subheader(tr("filter_view"))
         toggle_label = tr("show_unknown_btn") if st.session_state.get("hide_unknown_dimensions", False) else tr("hide_unknown_btn")
         if st.button(toggle_label):
