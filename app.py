@@ -160,22 +160,27 @@ def apply_manual_dimension_overrides(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
 
-    manual_hub_name = str(st.session_state.get("manual_hub_name", "")).strip()
-    manual_contractor_name = str(st.session_state.get("manual_contractor_name", "")).strip()
-    if not manual_hub_name and not manual_contractor_name:
+    contractor_overrides = st.session_state.get("unknown_contractor_overrides", {})
+    if not contractor_overrides:
         return df
 
     updated_df = df.copy()
-    if manual_hub_name and "Hub" in updated_df.columns:
-        hub_mask = updated_df["Hub"].map(is_unknown_dimension_value)
-        updated_df.loc[hub_mask, "Hub"] = manual_hub_name
+    if "Hub" not in updated_df.columns or "Contractor" not in updated_df.columns:
+        return updated_df
 
-    if manual_contractor_name and "Contractor" in updated_df.columns:
-        contractor_mask = updated_df["Contractor"].map(is_unknown_dimension_value)
-        updated_df.loc[contractor_mask, "Contractor"] = manual_contractor_name
+    normalized_hub_series = updated_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
+    contractor_unknown_mask = updated_df["Contractor"].map(is_unknown_dimension_value)
+
+    for hub_name, contractor_name in contractor_overrides.items():
+        hub_value = str(hub_name or "").strip()
+        contractor_value = str(contractor_name or "").strip()
+        if not hub_value or not contractor_value:
+            continue
+
+        target_hub_mask = normalized_hub_series == hub_value
+        updated_df.loc[target_hub_mask & contractor_unknown_mask, "Contractor"] = contractor_value
 
     return updated_df
-
 
 def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     # scan time - created time and check how many hours 
@@ -584,10 +589,12 @@ def main() -> None:
         st.session_state["hide_unknown_dimensions"] = False
     if "apply_ofd_filter" not in st.session_state:
         st.session_state["apply_ofd_filter"] = True
-    if "manual_hub_name" not in st.session_state:
-        st.session_state["manual_hub_name"] = ""
-    if "manual_contractor_name" not in st.session_state:
-        st.session_state["manual_contractor_name"] = ""
+    if "unknown_contractor_overrides" not in st.session_state:
+        st.session_state["unknown_contractor_overrides"] = {}
+    if "contractor_override_hub" not in st.session_state:
+        st.session_state["contractor_override_hub"] = ""
+    if "contractor_override_name" not in st.session_state:
+        st.session_state["contractor_override_name"] = ""
         
     st.selectbox(
         tr("language_label"),
@@ -742,18 +749,49 @@ def main() -> None:
         if st.button(toggle_label):
             st.session_state["hide_unknown_dimensions"] = not st.session_state.get("hide_unknown_dimensions", False)
 
-        override_c1, override_c2 = st.columns(2)
+        available_hubs = sorted(
+            result_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub").unique().tolist()
+        )
+        if available_hubs and st.session_state["contractor_override_hub"] not in available_hubs:
+            st.session_state["contractor_override_hub"] = available_hubs[0]
+
+        override_c1, override_c2, override_c3 = st.columns([2, 2, 1])
         with override_c1:
-            st.text_input(
-                tr("manual_hub_label"),
-                key="manual_hub_name",
-                placeholder=tr("manual_hub_placeholder"),
+            st.selectbox(
+                tr("override_hub_dropdown_label"),
+                options=available_hubs,
+                key="contractor_override_hub",
             )
         with override_c2:
             st.text_input(
-                tr("manual_contractor_label"),
-                key="manual_contractor_name",
-                placeholder=tr("manual_contractor_placeholder"),
+                tr("override_contractor_input_label"),
+                key="contractor_override_name",
+                placeholder=tr("override_contractor_input_placeholder"),
+            )
+        with override_c3:
+            st.write("")
+            if st.button(tr("override_apply_btn"), use_container_width=True):
+                selected_hub = str(st.session_state.get("contractor_override_hub", "")).strip()
+                contractor_name = str(st.session_state.get("contractor_override_name", "")).strip()
+                if selected_hub and contractor_name:
+                    overrides = dict(st.session_state.get("unknown_contractor_overrides", {}))
+                    overrides[selected_hub] = contractor_name
+                    st.session_state["unknown_contractor_overrides"] = overrides
+                    st.success(tr("override_apply_success", hub=selected_hub, contractor=contractor_name))
+                else:
+                    st.warning(tr("override_apply_validation"))
+
+        if st.session_state.get("unknown_contractor_overrides"):
+            st.caption(tr("override_applied_title"))
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"Hub": hub, "Contractor": contractor}
+                        for hub, contractor in st.session_state["unknown_contractor_overrides"].items()
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
             )
 
         result_df = apply_manual_dimension_overrides(result_df)
@@ -992,4 +1030,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
