@@ -393,23 +393,26 @@ def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) ->
     if not success_evt:
         return []
 
+    all_images: list[dict[str, Any]] = []
+
     pod_obj = success_evt.get("pod")
     if isinstance(pod_obj, dict):
         images = pod_obj.get("images")
         if isinstance(images, list):
-            return [x for x in images if isinstance(x, dict)]
+            all_images.extend([x for x in images if isinstance(x, dict)])
 
     pods_obj = success_evt.get("pods")
     if isinstance(pods_obj, dict):
         pod_list = pods_obj.get("pod")
-        if isinstance(pod_list, list) and pod_list:
-            first_pod = pod_list[0]
-            if isinstance(first_pod, dict):
-                images = first_pod.get("images")
+        if isinstance(pod_list, list):
+            for pod_entry in pod_list:
+                if not isinstance(pod_entry, dict):
+                    continue
+                images = pod_entry.get("images")
                 if isinstance(images, list):
-                    return [x for x in images if isinstance(x, dict)]
+                    all_images.extend([x for x in images if isinstance(x, dict)])
 
-    return []
+    return all_images
 
 
 def event_description(event: dict[str, Any]) -> str:
