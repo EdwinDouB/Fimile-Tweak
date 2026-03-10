@@ -156,6 +156,27 @@ def build_delivery_breakdown_table(delivered_detail_df: pd.DataFrame, thresholds
     return table_df
 
 
+def apply_manual_dimension_overrides(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    manual_hub_name = str(st.session_state.get("manual_hub_name", "")).strip()
+    manual_contractor_name = str(st.session_state.get("manual_contractor_name", "")).strip()
+    if not manual_hub_name and not manual_contractor_name:
+        return df
+
+    updated_df = df.copy()
+    if manual_hub_name and "Hub" in updated_df.columns:
+        hub_mask = updated_df["Hub"].map(is_unknown_dimension_value)
+        updated_df.loc[hub_mask, "Hub"] = manual_hub_name
+
+    if manual_contractor_name and "Contractor" in updated_df.columns:
+        contractor_mask = updated_df["Contractor"].map(is_unknown_dimension_value)
+        updated_df.loc[contractor_mask, "Contractor"] = manual_contractor_name
+
+    return updated_df
+
+
 def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     # scan time - created time and check how many hours 
     delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("metric") == "<24h delivery rate"), None)
@@ -563,6 +584,10 @@ def main() -> None:
         st.session_state["hide_unknown_dimensions"] = False
     if "apply_ofd_filter" not in st.session_state:
         st.session_state["apply_ofd_filter"] = True
+    if "manual_hub_name" not in st.session_state:
+        st.session_state["manual_hub_name"] = ""
+    if "manual_contractor_name" not in st.session_state:
+        st.session_state["manual_contractor_name"] = ""
         
     st.selectbox(
         tr("language_label"),
@@ -716,6 +741,22 @@ def main() -> None:
         toggle_label = tr("show_unknown_btn") if st.session_state.get("hide_unknown_dimensions", False) else tr("hide_unknown_btn")
         if st.button(toggle_label):
             st.session_state["hide_unknown_dimensions"] = not st.session_state.get("hide_unknown_dimensions", False)
+
+        override_c1, override_c2 = st.columns(2)
+        with override_c1:
+            st.text_input(
+                tr("manual_hub_label"),
+                key="manual_hub_name",
+                placeholder=tr("manual_hub_placeholder"),
+            )
+        with override_c2:
+            st.text_input(
+                tr("manual_contractor_label"),
+                key="manual_contractor_name",
+                placeholder=tr("manual_contractor_placeholder"),
+            )
+
+        result_df = apply_manual_dimension_overrides(result_df)
             
         ofd_series = pd.to_datetime(result_df["out_for_delivery_time"], errors="coerce")
         ofd_valid_dates = ofd_series.dropna().dt.date
@@ -951,3 +992,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
