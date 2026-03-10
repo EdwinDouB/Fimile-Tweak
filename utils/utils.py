@@ -1,134 +1,123 @@
-import os
-import re
-from datetime import datetime, timezone
-import pandas as pd
-import streamlit as st
+from utils.utils import *
+import base64
+import json
+import requests
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any
 
-from utils.constants import *
+from dotenv import load_dotenv
 
-def _extract_key_from_blob(raw_text: str, name: str) -> str | None:
-    """Extract KEY=VALUE from a multi-line blob."""
-    pattern = re.compile(rf"(?m)^\s*{re.escape(name)}\s*=\s*(.+?)\s*$")
-    match = pattern.search(raw_text)
-    if not match:
-        return None
+load_dotenv()
 
-    value = match.group(1).strip()
-    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"\"", "'"}:
-        value = value[1:-1]
-    return value or None
-
-
-def _read_streamlit_secret(name: str) -> str | None:
-    try:
-        secret_value = st.secrets.get(name)
-        if secret_value not in (None, ""):
-            return str(secret_value)
-
-        # Backward compatibility for incorrectly pasted secrets like:
-        # KEY1="..."\nKEY2="..." in a single secret entry.
-        for _, candidate in st.secrets.items():
-            if not isinstance(candidate, str):
-                continue
-            extracted = _extract_key_from_blob(candidate, name)
-            if extracted not in (None, ""):
-                return extracted
-    except Exception:
-        return None
-
-    return None
-
-def read_config(name: str, default: str = "") -> str:
-    """Read config from env first, then Streamlit secrets."""
-    value = os.getenv(name)
-    if value not in (None, ""):
-        return value
-
-    secret_value = _read_streamlit_secret(name)
-
-    if secret_value in (None, ""):
-        return default
-    return str(secret_value)
-
-def to_local_dt(ts_millis: Any) -> datetime | None:
-    if ts_millis is None:
-        return None
-    try:
-        millis = int(ts_millis)
-        return datetime.fromtimestamp(millis / 1000, tz=timezone.utc).astimezone()
-    except (ValueError, TypeError, OSError):
-        return None
+# API configuration comes from code/env only (not exposed in UI).
+API_URL_TEMPLATE = os.getenv(
+    "KPI_API_URL_TEMPLATE",
+    "https://isp.beans.ai/enterprise/v1/lists/status_logs"
+    "?tracking_id={tracking_id}&readable=true"
+    "&include_pod=true&include_item=true",
+)
+API_URL_TEMPLATE = read_config("KPI_API_URL_TEMPLATE", API_URL_TEMPLATE)
+API_TOKEN = read_config("KPI_API_TOKEN", "")
+API_AUTH_MODE = read_config("KPI_API_AUTH_MODE", "auto").strip().lower()
+API_TIMEOUT_SECONDS = int(read_config("KPI_API_TIMEOUT_SECONDS", "20"))
+API_MAX_WORKERS = max(1, int(read_config("KPI_API_MAX_WORKERS", "12")))
+API_EXTRA_HEADERS = read_config("KPI_API_EXTRA_HEADERS", "")
 
 
-def fmt_dt(dt: datetime | None) -> str:
-    return dt.strftime("%Y-%m-%d %H:%M:%S") if dt else ""
+def build_beans_tracking_link(tracking_id: str) -> str:
+    return f"https://www.beansroute.ai/3pl-manager/tabs.html#searchTrackingId/{tracking_id}"
 
 
-def diff_hours(end_dt: datetime | None, start_dt: datetime | None) -> str:
-    if not end_dt or not start_dt:
-        return ""
-    return f"{(end_dt - start_dt).total_seconds() / 3600:.2f}"
+def build_api_url(tracking_id: str) -> str:
+    if not API_URL_TEMPLATE:
+        raise RuntimeError("KPI_API_URL_TEMPLATE 未配置")
 
-def normalize_region(value: Any) -> str:
-    text = str(value or "").strip().upper()
+    if "{tracking_id}" in API_URL_TEMPLATE:
+        return API_URL_TEMPLATE.format(tracking_id=tracking_id)
 
-    if text in {"WE", "WEST", "W", "美西"}:
-        return "WE"
-    if text in {"EA", "EAST", "E", "美东"}:
-        return "EA"
-    return ""
-
-def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
-    if column not in df.columns:
-        return pd.Series(pd.NaT, index=df.index)
-    return pd.to_datetime(df[column], errors="coerce")
+    parsed = urlparse(API_URL_TEMPLATE)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query["tracking_id"] = tracking_id
+    return urlunparse(parsed._replace(query=urlencode(query)))
 
 
-def rate(numerator: int, denominator: int) -> float:
-    if denominator <= 0:
-        return 0.0
-    return numerator / denominator
+def _parse_extra_headers(raw: str) -> dict[str, str]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
 
+    if text.startswith("{"):
+        try:
+            payload = json.loads(text)
+            if isinstance(payload, dict):
+                return {str(k): str(v) for k, v in payload.items() if str(k).strip()}
+        except json.JSONDecodeError:
+            return {}
 
-def calculate_package_evaluation_weight(source_df: pd.DataFrame) -> pd.Series:
-    score_cols = [col for col in source_df.columns if col.startswith("pod_score_")]
-    if not score_cols:
-        return pd.Series([0.0] * len(source_df), index=source_df.index, dtype="float64")
+    parsed: dict[str, str] = {}
+    for line in text.splitlines():
+        item = line.strip()
+        if not item or item.startswith("#"):
+            continue
 
-    score_df = source_df[score_cols].apply(pd.to_numeric, errors="coerce")
-    return score_df.mean(axis=1, skipna=True).fillna(0.0)
-
-def tr(key: str, **kwargs: Any) -> str:
-    lang = st.session_state.get("language", "zh")
-    template = I18N.get(lang, I18N["zh"]).get(key, I18N["zh"].get(key, key))
-    return template.format(**kwargs)
-
-
-def read_uploaded_ids(uploaded_file) -> list[str]:
-    if uploaded_file is None:
-        return []
-
-    name = uploaded_file.name.lower()
-    try:
-        if name.endswith(".csv"):
-            df = pd.read_csv(uploaded_file, dtype=str)
-        elif name.endswith(".xlsx"):
-            df = pd.read_excel(uploaded_file, dtype=str)
+        if "=" in item:
+            key, value = item.split("=", 1)
+        elif ":" in item:
+            key, value = item.split(":", 1)
         else:
-            return []
-    except Exception:
-        return []
+            continue
 
-    if df.empty:
-        return []
+        key = key.strip()
+        value = value.strip()
+        if key:
+            parsed[key] = value
 
-    preferred = [c for c in df.columns if str(c).lower() in {"tracking_id", "trackingid", "tracking_id"}]
-    if preferred:
-        series = df[preferred[0]].dropna()
-        return series.astype(str).tolist()
+    return parsed
 
-    values: list[str] = []
-    for col in df.columns:
-        values.extend(df[col].dropna().astype(str).tolist())
-    return values
+
+def build_api_headers() -> dict[str, str]:
+    headers = {
+        "Accept": "application/json",
+        # Some upstream WAF rules reject python-requests' default UA and return 403.
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+    }
+    headers.update(_parse_extra_headers(API_EXTRA_HEADERS))
+
+    if not API_TOKEN or API_AUTH_MODE == "none":
+        return headers
+
+    token = API_TOKEN.strip()
+
+    if API_AUTH_MODE == "raw":
+        headers["Authorization"] = token
+        return headers
+
+    if API_AUTH_MODE == "basic":
+        encoded = base64.b64encode(token.encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {encoded}"
+        return headers
+
+    if API_AUTH_MODE == "bearer":
+        headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    # auto mode
+    if token.lower().startswith("basic ") or token.lower().startswith("bearer "):
+        headers["Authorization"] = token
+    elif ":" in token:
+        encoded = base64.b64encode(token.encode("utf-8")).decode("ascii")
+        headers["Authorization"] = f"Basic {encoded}"
+    else:
+        headers["Authorization"] = f"Bearer {token}"
+
+    return headers
+
+
+def fetch_tracking_data(tracking_id: str, session: requests.Session, headers: dict[str, str]) -> dict[str, Any]:
+    url = build_api_url(tracking_id)
+    response = session.get(url, headers=headers, timeout=API_TIMEOUT_SECONDS)
+    response.raise_for_status()
+    return response.json()
