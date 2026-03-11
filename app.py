@@ -120,7 +120,7 @@ def style_breakdown_rows(table_df: pd.DataFrame) -> Any:
 
     return table_df.style.apply(_style_row, axis=1)
 
-# returns a dataframe of delivery rates sorted by region -> hub -> contractor 
+
 def build_delivery_breakdown_table(delivered_detail_df: pd.DataFrame, thresholds: list[int]) -> pd.DataFrame:
     if delivered_detail_df.empty:
         return pd.DataFrame(columns=["Dimension", "Sample Count"])
@@ -301,7 +301,6 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
     non_pickup_df, _ = split_pickup_routes(result_df)
-    # sets up a dataframe for all delivered packages
     delivered_detail_df = non_pickup_df.loc[
         non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
         [
@@ -340,7 +339,6 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     render_daily_kpi_charts(result_df)
 
     st.markdown("#### 24/48/72h Delivery Rate (Scan -> Delivered)")
-    # takes in the dataframe of all delivered packages, seperate from the kpis 
     detailed_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24, 48, 72])
     st.dataframe(style_breakdown_rows(detailed_breakdown_df), use_container_width=True)
     delivered_detail_df = delivered_detail_df.drop(columns=["ofd_dt", "delivered_dt"])
@@ -508,14 +506,7 @@ def process_tracking_ids(
     rows_by_id: dict[str, dict[str, str]] = {}
     failures: list[dict[str, str]] = []
 
-    '''
-    # making a fake dataframe for testing with only one line of data 
-    df = pd.DataFrame(columns=OUTPUT_COLUMNS)
-    new_row_data = ["ZX34043383",	"EA",	"NJ",	"WYD China",	"WYD China",	"NJ",	"PARLIN",	"99 Callahan Blvd",	"Blender",	"EDS",	"GTN",	"EDS-NJS02-03/05-GTN-Blender",	"delivery",	"0",	"2026-03-04 04:52:43",	"2026-03-04 16:32:36",	"2026-03-04 21:55:10",	"2026-03-05 12:58:48",	"","",		"2026-03-05 23:58:56",	"EDS-NJS02-03/05-GTN-Blender",	"11.66",	"20.44",	"","11.00",	"43.10"]
-    # Use len(df) as the new index if using a default integer index
-    df.loc[len(df)] = new_row_data
-    return df, failures
-    '''
+    result_columns = OUTPUT_COLUMNS + POD_COLUMNS
 
     if not dedup_ids:
         return pd.DataFrame(columns=result_columns), failures
@@ -525,10 +516,10 @@ def process_tracking_ids(
     thread_local = local()
     headers = build_api_headers()
 
-    # fetches tracking data for every tracking ID. 
     def worker(tracking_id: str) -> tuple[str, dict[str, str], dict[str, str] | None]:
         if not hasattr(thread_local, "session"):
             thread_local.session = requests.Session()
+
         try:
             payload = fetch_tracking_data(tracking_id, thread_local.session, headers)
             row = build_row(tracking_id, payload)
@@ -1045,4 +1036,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
