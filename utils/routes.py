@@ -20,16 +20,20 @@ for i in range(1, POD_IMAGE_EXPORT_N + 1):
 EXPORT_EXCLUDED_COLUMNS = set(POD_COLUMNS)
 
 
-REGION_BY_STATE = {
-    "CA": "WE",
-    "TX": "WE",
-    "IL": "WE",
-    "NJ": "EA",
-    "GA": "EA",
-    "FL": "EA",
+REGION_BY_HUB = {
+    "EDS": "EA",
+    "ATL": "EA",
+    "MIA": "EA",
+    "ONT": "WE",
+    "HOU": "WE",
+    "WDR": "WE",
 }
 
 STATE_ALIAS = {}
+
+HUB_ALIAS = {
+    "GIA": "MIA",
+}
 
 HUB_BY_STATE = {
     "CA": "ONT",
@@ -43,7 +47,7 @@ HUB_BY_STATE = {
     "CT": "EDS"
 }
 
-KNOWN_HUBS = set(HUB_BY_STATE.values()) | {"PU"}
+KNOWN_HUBS = set(HUB_BY_STATE.values()) | set(HUB_ALIAS.values()) | {"PU"}
 
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -147,6 +151,7 @@ def normalize_hub_name(hub: str, fallback_state: str = "") -> str:
         return infer_hub_from_state(fallback_state)
 
     hub_compact = re.sub(r"[^A-Z]", "", hub_text)
+    hub_compact = HUB_ALIAS.get(hub_compact, hub_compact)
     if hub_compact in KNOWN_HUBS:
         return hub_compact
 
@@ -555,8 +560,8 @@ def normalize_state(state: str) -> str:
 
 
 def infer_region_from_state(state: str) -> str:
-    normalized_state = normalize_state(state)
-    return REGION_BY_STATE.get(normalized_state, "")
+    hub = infer_hub_from_state(state)
+    return REGION_BY_HUB.get(hub, "")
 
 def normalize_region(region: str) -> str:
     region_text = str(region or "").strip().upper()
