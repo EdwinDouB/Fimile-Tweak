@@ -1,4 +1,3 @@
-
 from utils.utils import to_datetime_series, rate
 from datetime import datetime, timezone
 from utils.routes import split_pickup_routes, build_lost_package_analysis
@@ -13,8 +12,6 @@ def build_kpi_report_payload(
     pod_compliance_map: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     df = result_df.copy()
-
-    # converting dates & times
     df["created_dt"] = to_datetime_series(df, "created_time")
     df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
     df["last_scanned_dt"] = to_datetime_series(df, "last_scanned_time")
@@ -23,14 +20,11 @@ def build_kpi_report_payload(
     df["delivered_dt"] = to_datetime_series(df, "delivered_time")
     df["month"] = df["created_dt"].dt.to_period("M").astype(str)
     df.loc[df["month"] == "NaT", "month"] = "Unknown"
-
-    # finding the packages we are dropping off
     non_pickup_df, _ = split_pickup_routes(df)
 
     metrics: list[dict[str, Any]] = []
     chart_rows: list[dict[str, Any]] = []
 
-    # calculating delivered - out for delivery 
     non_pickup_df["ofd_to_delivered_hours"] = (non_pickup_df["delivered_dt"] - non_pickup_df["ofd_dt"]).dt.total_seconds() / 3600
     ofd_present_mask = non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne("")
     ofd_base = non_pickup_df[ofd_present_mask].copy()
@@ -64,7 +58,6 @@ def build_kpi_report_payload(
             ]
         )
 
-    # find the time between the first scan and the created time, and add it to the metrics chart
     df["created_to_scan_hours"] = (df["first_scanned_dt"] - df["created_dt"]).dt.total_seconds() / 3600
     total_count = len(df)
     for threshold in [12, 24, 48, 72]:
