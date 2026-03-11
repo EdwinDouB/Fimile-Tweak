@@ -496,6 +496,55 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     return kpi_payload
 
 
+def build_layout_specific_report_payload(kpi_payload: dict[str, Any], layout_mode: str) -> dict[str, Any]:
+    if layout_mode != "compact":
+        return kpi_payload
+
+    compact_metric_names = {"<24h delivery rate", "POD compliance rate", "24h attempt rate"}
+    compact_metrics = [m for m in kpi_payload.get("metrics", []) if m.get("metric") in compact_metric_names]
+    compact_charts = [c for c in kpi_payload.get("charts", []) if c.get("chart") in compact_metric_names]
+
+    return {
+        **kpi_payload,
+        "metrics": compact_metrics,
+        "charts": compact_charts,
+    }
+
+
+def build_layout_specific_export_df(filtered_df: pd.DataFrame, layout_mode: str) -> pd.DataFrame:
+    if layout_mode != "compact":
+        return build_export_df(filtered_df)
+
+    non_pickup_df, _ = split_pickup_routes(filtered_df)
+    delivered_detail_df = non_pickup_df.loc[
+        non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
+        [
+            "tracking_id",
+            "Region",
+            "State",
+            "shipperName",
+            "Hub",
+            "Contractor",
+            "Route_name",
+            "out_for_delivery_time",
+            "delivered_time",
+        ],
+    ].copy()
+    delivered_detail_df["ofd_dt"] = to_datetime_series(delivered_detail_df, "out_for_delivery_time")
+    delivered_detail_df["delivered_dt"] = to_datetime_series(delivered_detail_df, "delivered_time")
+    delivered_detail_df["ofd_to_delivered_hours"] = (
+        delivered_detail_df["delivered_dt"] - delivered_detail_df["ofd_dt"]
+    ).dt.total_seconds() / 3600
+    delivered_detail_df["within_24h"] = (
+        delivered_detail_df["delivered_dt"].notna()
+        & (delivered_detail_df["ofd_to_delivered_hours"] >= 0)
+        & (delivered_detail_df["ofd_to_delivered_hours"] < 24)
+    )
+
+    compact_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24])
+    return compact_breakdown_df
+
+
 def process_tracking_ids(
     dedup_ids: list[str],
     receive_province_map: dict[str, str],
@@ -1009,22 +1058,23 @@ def main() -> None:
             delivered_df = delivered_df.sort_values(by=["_delivered_dt", "tracking_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        export_df = build_export_df(filtered_df)
+        export_df = build_layout_specific_export_df(filtered_df, layout_mode)
         csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
+        report_payload = build_layout_specific_report_payload(kpi_payload, layout_mode)
         kpi_report_data = None
         c_csv, c_report = st.columns(2)
         c_csv.download_button(
             tr("download_csv"),
             data=csv_data,
-            file_name=f"export_{stamp}.csv",
+            file_name=f"export_{layout_mode}_{stamp}.csv",
             mime="text/csv",
         )
         try:
-            kpi_report_data = kpi_report_to_excel_bytes(kpi_payload, export_df)
+            kpi_report_data = kpi_report_to_excel_bytes(report_payload, export_df)
             c_report.download_button(
                 tr("download_report"),
                 data=kpi_report_data,
-                file_name=f"kpi_report_{stamp}.xlsx",
+                file_name=f"kpi_report_{layout_mode}_{stamp}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
         except Exception:
@@ -1036,3 +1086,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
