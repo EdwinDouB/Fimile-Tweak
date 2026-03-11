@@ -29,13 +29,21 @@ REGION_BY_STATE = {
     "FL": "EA",
 }
 
-STATE_ALIAS = {
-    "NY": "NJ",
-}
+STATE_ALIAS = {}
 
 HUB_BY_STATE = {
     "CA": "ONT",
+    "IL": "WDR",
+    "FL": "MIA",
+    "NJ": "EDS",
+    "NY": "EDS",
+    "TX": "HOU",
+    "GA": "ATL",
+    "PA": "EDS",
+    "CT": "EDS"
 }
+
+KNOWN_HUBS = set(HUB_BY_STATE.values()) | {"PU"}
 
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -73,6 +81,24 @@ def parse_route(description: Any) -> str:
         return match.group(1).strip("\"' \t-:：")
     return ""
 
+def latest_route_assignment(events: list[dict[str, Any]]) -> str:
+    candidates: list[tuple[int, int, str]] = []
+    for idx, event in enumerate(events):
+        route_name = parse_route(event_description(event))
+        if not route_name:
+            continue
+
+        ts = event_ts(event)
+        sort_ts = ts if ts is not None else -1
+        candidates.append((sort_ts, idx, route_name))
+
+    if not candidates:
+        return ""
+
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    return candidates[-1][2]
+
+
 
 def extract_route_parts(route_name: str) -> list[str]:
     text = str(route_name or "").strip()
@@ -103,11 +129,50 @@ def is_valid_contractor_name(contractor: str) -> bool:
 def infer_hub_from_state(state: str) -> str:
     normalized_state = normalize_state(state)
     return HUB_BY_STATE.get(normalized_state, "")
+def _is_single_adjacent_swap(source: str, target: str) -> bool:
+    if len(source) != len(target):
+        return False
+
+    diffs = [idx for idx, (s_char, t_char) in enumerate(zip(source, target)) if s_char != t_char]
+    if len(diffs) != 2:
+        return False
+
+    first, second = diffs
+    return second == first + 1 and source[first] == target[second] and source[second] == target[first]
+
+
+def normalize_hub_name(hub: str, fallback_state: str = "") -> str:
+    hub_text = str(hub or "").strip().upper()
+    if not hub_text:
+        return infer_hub_from_state(fallback_state)
+
+    hub_compact = re.sub(r"[^A-Z]", "", hub_text)
+    if hub_compact in KNOWN_HUBS:
+        return hub_compact
+
+    # Auto-fix common 3-letter typos caused by adjacent letter swaps, e.g. ALT -> ATL.
+    if len(hub_compact) == 3:
+        typo_candidates = [known for known in KNOWN_HUBS if len(known) == 3 and _is_single_adjacent_swap(hub_compact, known)]
+        if len(typo_candidates) == 1:
+            return typo_candidates[0]
+
+    if is_valid_hub_name(hub_compact):
+        return hub_compact
+
+    return infer_hub_from_state(hub_compact) or infer_hub_from_state(fallback_state)
+
 
 
 def looks_like_driver_token(token: str) -> bool:
     text = str(token or "").strip().upper()
     return bool(re.fullmatch(r"[A-Z]{4,}", text))
+
+def looks_like_route_date_token(token: str) -> bool:
+    text = str(token or "").strip()
+    if not text:
+        return False
+    return bool(re.fullmatch(r"\d{1,2}[/\-.]\d{1,2}", text))
+
 
 
 def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str, str]:
@@ -117,23 +182,43 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     """
     parts = extract_route_parts(route_name)
     if len(parts) < 2:
-        return {"Hub": "", "Contractor": "", "Driver": "", "Route_type": "delivery"}
+        fallback_hub = infer_hub_from_state(fallback_state)
+        return {
+            "Hub": fallback_hub,
+            "Contractor": "",
+            "Driver": "",
+            "Route_type": "pickup" if fallback_hub == "PU" else "delivery",
+        }
 
     contractor = ""
     driver = ""
     contractor_idx = -1
 
-    for idx in range(len(parts) - 1, 0, -1):
-        raw_candidate = parts[idx].strip().upper()
+    date_idx = -1
+    for idx, token in enumerate(parts):
+        if looks_like_route_date_token(token):
+            date_idx = idx
+            break
+
+    if date_idx >= 0 and date_idx + 1 < len(parts):
+        raw_candidate = parts[date_idx + 1].strip().upper()
         candidate = re.sub(r"[^A-Za-z0-9]", "", raw_candidate)
-        if "/" in raw_candidate:
-            continue
-        if idx == len(parts) - 1 and len(parts) >= 3 and looks_like_driver_token(candidate):
-            continue
         if is_valid_contractor_name(candidate):
             contractor = candidate
-            contractor_idx = idx
-            break
+            contractor_idx = date_idx + 1
+
+    if contractor_idx < 0:
+        for idx in range(len(parts) - 1, 0, -1):
+            raw_candidate = parts[idx].strip().upper()
+            candidate = re.sub(r"[^A-Za-z0-9]", "", raw_candidate)
+            if "/" in raw_candidate:
+                continue
+            if idx == len(parts) - 1 and len(parts) >= 3 and looks_like_driver_token(candidate):
+                continue
+            if is_valid_contractor_name(candidate):
+                contractor = candidate
+                contractor_idx = idx
+                break
 
     if contractor_idx >= 0:
         driver_tokens = [token.strip() for token in parts[contractor_idx + 1 :] if token.strip()]
@@ -142,9 +227,7 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     elif len(parts) >= 2:
         driver = parts[-1].strip().title()
 
-    hub = parts[0].upper()
-    if not is_valid_hub_name(hub):
-        hub = infer_hub_from_state(hub) or infer_hub_from_state(fallback_state)
+    hub = normalize_hub_name(parts[0], fallback_state=fallback_state)
 
     if contractor and not is_valid_contractor_name(contractor):
         contractor = ""
@@ -310,23 +393,26 @@ def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) ->
     if not success_evt:
         return []
 
+    all_images: list[dict[str, Any]] = []
+
     pod_obj = success_evt.get("pod")
     if isinstance(pod_obj, dict):
         images = pod_obj.get("images")
         if isinstance(images, list):
-            return [x for x in images if isinstance(x, dict)]
+            all_images.extend([x for x in images if isinstance(x, dict)])
 
     pods_obj = success_evt.get("pods")
     if isinstance(pods_obj, dict):
         pod_list = pods_obj.get("pod")
-        if isinstance(pod_list, list) and pod_list:
-            first_pod = pod_list[0]
-            if isinstance(first_pod, dict):
-                images = first_pod.get("images")
+        if isinstance(pod_list, list):
+            for pod_entry in pod_list:
+                if not isinstance(pod_entry, dict):
+                    continue
+                images = pod_entry.get("images")
                 if isinstance(images, list):
-                    return [x for x in images if isinstance(x, dict)]
+                    all_images.extend([x for x in images if isinstance(x, dict)])
 
-    return []
+    return all_images
 
 
 def event_description(event: dict[str, Any]) -> str:
@@ -400,7 +486,8 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     scan_hub = infer_hub_from_pre_ofd_scan(events, ofd_evt)
     fail_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
     success_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
-
+    latest_route = latest_route_assignment(events)
+    
     created_time = to_local_dt(event_ts(created_evt) if created_evt else None)
     first_scanned_time = to_local_dt(event_ts(first_scanned_evt) if first_scanned_evt else None)
     last_scanned_time = to_local_dt(event_ts(last_scanned_evt) if last_scanned_evt else None)
@@ -428,7 +515,8 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "failed_route": parse_route(event_description(fail_evt)) if fail_evt else "",
         "delivered_time": fmt_dt(delivered_time),
         "success_route": parse_route(event_description(success_evt)) if success_evt else "",
-        "Route_name": "",
+        "ofd_route": parse_route(event_description(ofd_evt)) if ofd_evt else "",
+        "Route_name": latest_route,
         "创建到入库时间": diff_hours(first_scanned_time, created_time),
         "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
         "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
@@ -492,13 +580,20 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["Route_type"] = ""
 
     for idx, row in df.iterrows():
-        route_name = str(row.get("success_route") or row.get("failed_route") or "").strip()
-        fallback_state = str(row.get("sender_province") or row.get("State") or "")
+        route_name = str(
+            row.get("Route_name")
+            or row.get("success_route")
+            or row.get("failed_route")
+            or row.get("ofd_route")
+            or ""
+        ).strip()
+        route_name = str(row.get("success_route") or row.get("failed_route") or row.get("ofd_route") or "").strip()
+        fallback_state = str(row.get("State") or row.get("sender_province") or "")
         route_info = parse_route_identity(route_name, fallback_state=fallback_state)
         df.at[idx, "Route_name"] = route_name
         df.at[idx, "Driver"] = route_info["Driver"]
-        fallback_hub = str(row.get("Hub") or "").strip().upper()
-        parsed_hub = route_info["Hub"].strip().upper()
+        fallback_hub = normalize_hub_name(row.get("Hub") or "", fallback_state=fallback_state)
+        parsed_hub = normalize_hub_name(route_info["Hub"], fallback_state=fallback_state)
         df.at[idx, "Hub"] = parsed_hub or fallback_hub
         df.at[idx, "Contractor"] = route_info["Contractor"]
         df.at[idx, "Route_type"] = route_info["Route_type"]

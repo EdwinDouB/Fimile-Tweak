@@ -1,13 +1,17 @@
-from datetime import datetime
+
 from utils.utils import to_datetime_series, rate
 from datetime import datetime, timezone
 from utils.routes import split_pickup_routes, build_lost_package_analysis
+from utils.routes import auto_is_pod_compliant
 from typing import Any
 import pandas as pd
 import io 
 
-def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
-
+def build_kpi_report_payload(
+    result_df: pd.DataFrame,
+    fetch_reference_time: datetime | None = None,
+    pod_compliance_map: dict[str, bool] | None = None,
+) -> dict[str, Any]:
     df = result_df.copy()
 
     # converting dates & times
@@ -31,7 +35,11 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
     ofd_present_mask = non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne("")
     ofd_base = non_pickup_df[ofd_present_mask].copy()
 
-    # for 24, 48, and 72 hours, calculate wether or not the package is delivered & add it to metrics dataframe
+    delivered_within_24h = ofd_base[
+        ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < 24)
+    ]
+
+    
     for threshold in [24, 48, 72]:
         within = ofd_base[
             ofd_base["delivered_dt"].notna() & (ofd_base["ofd_to_delivered_hours"] >= 0) & (ofd_base["ofd_to_delivered_hours"] < threshold)
@@ -82,7 +90,86 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
             ]
         )
 
-    # calculate # of packages lost and build a lost package analysis 
+    manual_map = pod_compliance_map or {}
+
+    def _resolve_pod_compliance(row: pd.Series) -> bool:
+        tracking_id = str(row.get("tracking_id") or "").strip()
+        if tracking_id and tracking_id in manual_map:
+            return bool(manual_map[tracking_id])
+        return auto_is_pod_compliant(row)
+
+    pod_compliant_mask = delivered_within_24h.apply(_resolve_pod_compliance, axis=1)
+    pod_total_count = len(delivered_within_24h)
+    pod_hit_count = int(pod_compliant_mask.sum())
+    pod_miss_count = max(pod_total_count - pod_hit_count, 0)
+    metrics.append(
+        {
+            "category": "dsp_assessment",
+            "metric": "POD compliance rate",
+            "hit": pod_hit_count,
+            "total": pod_total_count,
+            "rate": rate(pod_hit_count, pod_total_count),
+        }
+    )
+    chart_rows.extend(
+        [
+            {
+                "chart": "POD compliance rate",
+                "category": "POD compliant",
+                "count": pod_hit_count,
+                "rate": rate(pod_hit_count, pod_total_count),
+            },
+            {
+                "chart": "POD compliance rate",
+                "category": "Not POD compliant",
+                "count": pod_miss_count,
+                "rate": rate(pod_miss_count, pod_total_count),
+            },
+        ]
+    )
+
+    attempt_base = non_pickup_df[ofd_present_mask].copy()
+    attempt_base["ofd_to_attempted_hours"] = (attempt_base["attempted_dt"] - attempt_base["ofd_dt"]).dt.total_seconds() / 3600
+    attempt_base["ofd_to_delivered_hours"] = (attempt_base["delivered_dt"] - attempt_base["ofd_dt"]).dt.total_seconds() / 3600
+    attempt_hit_mask = (
+        (attempt_base["delivered_dt"].notna())
+        & (attempt_base["ofd_to_delivered_hours"] >= 0)
+        & (attempt_base["ofd_to_delivered_hours"] < 24)
+    ) | (
+        (attempt_base["attempted_dt"].notna())
+        & (attempt_base["ofd_to_attempted_hours"] >= 0)
+        & (attempt_base["ofd_to_attempted_hours"] < 24)
+    )
+    attempt_total_count = len(attempt_base)
+    attempt_hit_count = int(attempt_hit_mask.sum())
+    attempt_miss_count = max(attempt_total_count - attempt_hit_count, 0)
+    metrics.append(
+        {
+            "category": "dsp_assessment",
+            "metric": "24h attempt rate",
+            "hit": attempt_hit_count,
+            "total": attempt_total_count,
+            "rate": rate(attempt_hit_count, attempt_total_count),
+        }
+    )
+    chart_rows.extend(
+        [
+            {
+                "chart": "24h attempt rate",
+                "category": "Attempted or delivered within 24h",
+                "count": attempt_hit_count,
+                "rate": rate(attempt_hit_count, attempt_total_count),
+            },
+            {
+                "chart": "24h attempt rate",
+                "category": "No attempt/delivery within 24h",
+                "count": attempt_miss_count,
+                "rate": rate(attempt_miss_count, attempt_total_count),
+            },
+        ]
+    )
+
+    
     lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
     scanned_base = lost_analysis["scanned_base"]
     scanned_base["lost"] = lost_analysis["lost_mask"].loc[scanned_base.index].astype(int)
