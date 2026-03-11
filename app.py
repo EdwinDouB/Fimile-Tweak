@@ -545,6 +545,26 @@ def build_layout_specific_export_df(filtered_df: pd.DataFrame, layout_mode: str)
     return compact_breakdown_df
 
 
+
+def build_detailed_report_detail_df(filtered_df: pd.DataFrame) -> pd.DataFrame:
+    non_pickup_df, _ = split_pickup_routes(filtered_df)
+    detail_df = non_pickup_df.loc[
+        non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
+        [
+            "tracking_id",
+            "Region",
+            "State",
+            "shipperName",
+            "Hub",
+            "Contractor",
+            "Route_name",
+            "out_for_delivery_time",
+            "delivered_time",
+        ],
+    ].copy()
+    return detail_df
+
+
 def process_tracking_ids(
     dedup_ids: list[str],
     receive_province_map: dict[str, str],
@@ -1069,8 +1089,9 @@ def main() -> None:
             file_name=f"export_{layout_mode}_{stamp}.csv",
             mime="text/csv",
         )
+        report_detail_df = build_detailed_report_detail_df(filtered_df) if layout_mode == "detailed" else export_df
         try:
-            kpi_report_data = kpi_report_to_excel_bytes(report_payload, export_df)
+            kpi_report_data = kpi_report_to_excel_bytes(report_payload, report_detail_df, layout_mode=layout_mode)
             c_report.download_button(
                 tr("download_report"),
                 data=kpi_report_data,
@@ -1086,4 +1107,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
