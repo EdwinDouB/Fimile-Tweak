@@ -405,7 +405,12 @@ def build_kpi_report_payload(
         "monthly_lost": monthly_lost,
     }
 
-def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFrame | None = None, layout_mode: str = "detailed") -> bytes:
+def kpi_report_to_excel_bytes(
+    kpi_payload: dict[str, Any],
+    detail_df: pd.DataFrame | None = None,
+    layout_mode: str = "detailed",
+    source_df: pd.DataFrame | None = None,
+) -> bytes:
     output = io.BytesIO()
     metrics_df = pd.DataFrame(kpi_payload["metrics"])
     chart_df = pd.DataFrame(kpi_payload["charts"])
@@ -427,11 +432,13 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFra
             )
 
             hub_series = detail_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
+            hub_source = source_df if source_df is not None and not source_df.empty else detail_df
+            hub_source_series = hub_source["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
             for hub_name in sorted(hub_series.unique()):
                 hub_table = _build_hub_table(detail_df, hub_name)
                 if hub_table.empty:
                     continue
-                hub_df = detail_df[hub_series == hub_name].copy()
+                hub_df = hub_source[hub_source_series == hub_name].copy()
                 hub_payload = build_kpi_report_payload(hub_df)
                 hub_chart_df = pd.DataFrame(hub_payload["charts"])
                 hub_metrics_df = pd.DataFrame(hub_payload["metrics"])
