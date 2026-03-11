@@ -41,6 +41,9 @@ def _require_db_env() -> None:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str]:
+    # fake tracking number for testing
+    return ["ZX34043383"]
+
     """
     Query waybill_waybills for tracking_number where created_at is between [start_date, end_date] inclusive.
     """
