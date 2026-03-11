@@ -7,7 +7,11 @@ from typing import Any
 import pandas as pd
 import io 
 
-def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
+def build_kpi_report_payload(
+    result_df: pd.DataFrame,
+    fetch_reference_time: datetime | None = None,
+    pod_compliance_map: dict[str, bool] | None = None,
+) -> dict[str, Any]:
     df = result_df.copy()
     df["created_dt"] = to_datetime_series(df, "created_time")
     df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
@@ -75,7 +79,15 @@ def build_kpi_report_payload(result_df: pd.DataFrame, fetch_reference_time: date
             ]
         )
 
-    pod_compliant_mask = ofd_base.apply(auto_is_pod_compliant, axis=1)
+    manual_map = pod_compliance_map or {}
+
+    def _resolve_pod_compliance(row: pd.Series) -> bool:
+        tracking_id = str(row.get("tracking_id") or "").strip()
+        if tracking_id and tracking_id in manual_map:
+            return bool(manual_map[tracking_id])
+        return auto_is_pod_compliant(row)
+
+    pod_compliant_mask = ofd_base.apply(_resolve_pod_compliance, axis=1)
     pod_total_count = len(ofd_base)
     pod_hit_count = int(pod_compliant_mask.sum())
     pod_miss_count = max(pod_total_count - pod_hit_count, 0)
