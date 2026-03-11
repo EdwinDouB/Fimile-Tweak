@@ -94,8 +94,6 @@ def build_kpi_report_payload(
 
     pod_compliant_mask = delivered_within_24h.apply(_resolve_pod_compliance, axis=1)
     pod_total_count = len(delivered_within_24h)
-    pod_compliant_mask = ofd_base.apply(_resolve_pod_compliance, axis=1)
-    pod_total_count = len(ofd_base)
     pod_hit_count = int(pod_compliant_mask.sum())
     pod_miss_count = max(pod_total_count - pod_hit_count, 0)
     metrics.append(
