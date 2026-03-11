@@ -5,7 +5,6 @@ from utils.routes import auto_is_pod_compliant
 from typing import Any
 import pandas as pd
 import io 
-from xlsxwriter.utility import quote_sheetname, xl_rowcol_to_cell
 
 def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
     if detail_df is None or detail_df.empty:
@@ -139,12 +138,7 @@ def _insert_dashboard_charts(
     data_fmt = workbook.add_format({"border": 1})
     percent_fmt = workbook.add_format({"border": 1, "num_format": "0.00%"})
 
-    sheet_ref = quote_sheetname(worksheet.get_name())
-
-    def _range_formula(start_row: int, start_col: int, end_row: int, end_col: int) -> str:
-        start = xl_rowcol_to_cell(start_row, start_col, row_abs=True, col_abs=True)
-        end = xl_rowcol_to_cell(end_row, end_col, row_abs=True, col_abs=True)
-        return f"={sheet_ref}!{start}:{end}"
+    sheet_name = worksheet.get_name()
 
 
     write_row = 0
@@ -184,8 +178,8 @@ def _insert_dashboard_charts(
         pie.add_series(
             {
                 "name": chart_name,
-                "categories": _range_formula(row_ids[0], data_col + 1, row_ids[-1], data_col + 1),
-                "values": _range_formula(row_ids[0], data_col + 2, row_ids[-1], data_col + 2),
+                "categories": [sheet_name, row_ids[0], data_col + 1, row_ids[-1], data_col + 1],
+                "values": [sheet_name, row_ids[0], data_col + 2, row_ids[-1], data_col + 2],
                 "data_labels": {"percentage": True, "category": True},
             }
         )
@@ -209,8 +203,8 @@ def _insert_dashboard_charts(
             col.add_series(
                 {
                     "name": "12/24/48/72 scan rate",
-                    "categories": _range_formula(scan_row_start, data_col + 1, scan_row_end, data_col + 1),
-                    "values": _range_formula(scan_row_start, data_col + 3, scan_row_end, data_col + 3),
+                    "categories": [sheet_name, scan_row_start, data_col + 1, scan_row_end, data_col + 1],
+                    "values": [sheet_name, scan_row_start, data_col + 3, scan_row_end, data_col + 3],
                     "data_labels": {"value": True, "num_format": "0.00%"},
                 }
             )
