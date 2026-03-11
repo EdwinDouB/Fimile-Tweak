@@ -120,6 +120,98 @@ def _style_overview_worksheet(worksheet, table_df: pd.DataFrame, start_row: int,
     worksheet.set_column(0, 0, 28)
     worksheet.set_column(1, 7, 18)
 
+def _sanitize_sheet_name(name: str) -> str:
+    invalid_chars = set('[]:*?/\\')
+    cleaned = "".join("_" if ch in invalid_chars else ch for ch in str(name))
+    return cleaned[:31]
+
+
+def _insert_dashboard_charts(
+    worksheet,
+    workbook,
+    chart_df: pd.DataFrame,
+    metrics_df: pd.DataFrame,
+    chart_row: int,
+    chart_col: int,
+    data_col: int,
+) -> None:
+    header_fmt = workbook.add_format({"bold": True, "bg_color": "#e5e7eb", "border": 1})
+    data_fmt = workbook.add_format({"border": 1})
+    percent_fmt = workbook.add_format({"border": 1, "num_format": "0.00%"})
+
+    write_row = 0
+    def _write_data_row(chart_name: str, category: str, count: int, value_rate: float) -> int:
+        nonlocal write_row
+        target_row = write_row
+        worksheet.write(target_row, data_col, chart_name, data_fmt)
+        worksheet.write(target_row, data_col + 1, category, data_fmt)
+        worksheet.write(target_row, data_col + 2, count, data_fmt)
+        worksheet.write(target_row, data_col + 3, value_rate, percent_fmt)
+        write_row += 1
+        return target_row
+
+    for offset, title in enumerate(["chart", "category", "count", "rate"]):
+        worksheet.write(0, data_col + offset, title, header_fmt)
+    write_row = 1
+
+    chart_positions = {
+        "<24h delivery rate": (chart_row, chart_col),
+        "<48h delivery rate": (chart_row, chart_col + 8),
+        "<72h delivery rate": (chart_row, chart_col + 16),
+        "12/24/48/72 scan rate": (chart_row + 16, chart_col),
+        "POD compliance rate": (chart_row + 32, chart_col),
+        "24h attempt rate": (chart_row + 32, chart_col + 8),
+        "lost rate": (chart_row + 32, chart_col + 16),
+    }
+
+    for chart_name in ["<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "POD compliance rate", "24h attempt rate", "lost rate"]:
+        group = chart_df[chart_df["chart"] == chart_name]
+        if group.empty:
+            continue
+        row_ids = []
+        for _, rec in group.iterrows():
+            row_ids.append(_write_data_row(chart_name, str(rec.get("category", "")), int(rec.get("count", 0)), float(rec.get("rate", 0))))
+
+        pie = workbook.add_chart({"type": "pie"})
+        pie.add_series(
+            {
+                "name": chart_name,
+                "categories": [worksheet.name, row_ids[0], data_col + 1, row_ids[-1], data_col + 1],
+                "values": [worksheet.name, row_ids[0], data_col + 2, row_ids[-1], data_col + 2],
+                "data_labels": {"percentage": True, "category": True},
+            }
+        )
+        pie.set_title({"name": chart_name})
+        pie.set_style(10)
+        worksheet.insert_chart(*chart_positions[chart_name], pie, {"x_scale": 1.0, "y_scale": 1.0})
+
+    scan_metrics = metrics_df[metrics_df["category"] == "scan_rate_12_24_48_72"].copy()
+    if not scan_metrics.empty:
+        scan_row_start = write_row
+        ordered_scan = ["<12h scan rate", "<24h scan rate", "<48h scan rate", "<72h scan rate"]
+        for metric_name in ordered_scan:
+            rec = scan_metrics[scan_metrics["metric"] == metric_name]
+            if rec.empty:
+                continue
+            value = float(rec.iloc[0].get("rate", 0))
+            _write_data_row("12/24/48/72 scan rate", metric_name, 0, value)
+        scan_row_end = write_row - 1
+        if scan_row_end >= scan_row_start:
+            col = workbook.add_chart({"type": "column"})
+            col.add_series(
+                {
+                    "name": "12/24/48/72 scan rate",
+                    "categories": [worksheet.name, scan_row_start, data_col + 1, scan_row_end, data_col + 1],
+                    "values": [worksheet.name, scan_row_start, data_col + 3, scan_row_end, data_col + 3],
+                    "data_labels": {"value": True, "num_format": "0.00%"},
+                }
+            )
+            col.set_title({"name": "12/24/48/72 scan rate"})
+            col.set_y_axis({"num_format": "0%", "min": 0, "max": 1})
+            worksheet.insert_chart(*chart_positions["12/24/48/72 scan rate"], col, {"x_scale": 1.0, "y_scale": 1.0})
+
+    worksheet.set_column(data_col, data_col + 3, 2, None, {"hidden": True})
+
 
 
 def build_kpi_report_payload(
@@ -288,7 +380,7 @@ def build_kpi_report_payload(
     metrics.append(
         {
             "category": "monthly_lost_rate_last_scan_120h",
-            "metric": "overall monthly lost rate",
+            "metric": "lost rate",
             "hit": lost_total,
             "total": scanned_total,
             "rate": rate(lost_total, scanned_total),
@@ -296,9 +388,9 @@ def build_kpi_report_payload(
     )
     chart_rows.extend(
         [
-            {"chart": "overall monthly lost rate", "category": "Lost", "count": lost_total, "rate": rate(lost_total, scanned_total)},
+            {"chart": "lost rate", "category": "Lost", "count": lost_total, "rate": rate(lost_total, scanned_total)},
             {
-                "chart": "overall monthly lost rate",
+                "chart": "lost rate",
                 "category": "Not lost",
                 "count": max(scanned_total - lost_total, 0),
                 "rate": rate(max(scanned_total - lost_total, 0), scanned_total),
@@ -319,12 +411,48 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFra
     chart_df = pd.DataFrame(kpi_payload["charts"])
 
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        workbook = writer.book
+        if layout_mode == "detailed" and detail_df is not None and not detail_df.empty:
+            overview_ws = workbook.add_worksheet("overview")
+            overview_table = _build_detailed_overview_table(detail_df)
+            _style_overview_worksheet(overview_ws, overview_table, 0, workbook)
+            _insert_dashboard_charts(
+                overview_ws,
+                workbook,
+                chart_df,
+                metrics_df,
+                chart_row=0,
+                chart_col=max(len(overview_table.columns) + 2, 10),
+                data_col=max(len(overview_table.columns) + 28, 36),
+            )
+
+            hub_series = detail_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
+            for hub_name in sorted(hub_series.unique()):
+                hub_table = _build_hub_table(detail_df, hub_name)
+                if hub_table.empty:
+                    continue
+                hub_df = detail_df[hub_series == hub_name].copy()
+                hub_payload = build_kpi_report_payload(hub_df)
+                hub_chart_df = pd.DataFrame(hub_payload["charts"])
+                hub_metrics_df = pd.DataFrame(hub_payload["metrics"])
+                sheet_name = _sanitize_sheet_name(f"HUB_{hub_name}")
+                hub_ws = workbook.add_worksheet(sheet_name)
+                _style_overview_worksheet(hub_ws, hub_table, 0, workbook)
+                _insert_dashboard_charts(
+                    hub_ws,
+                    workbook,
+                    hub_chart_df,
+                    hub_metrics_df,
+                    chart_row=0,
+                    chart_col=max(len(hub_table.columns) + 2, 10),
+                    data_col=max(len(hub_table.columns) + 28, 36),
+                )
+
         metrics_df.to_excel(writer, index=False, sheet_name="kpi_summary")
         chart_df.to_excel(writer, index=False, sheet_name="kpi_chart_data")
         if detail_df is not None and not detail_df.empty:
             detail_df.to_excel(writer, index=False, sheet_name="detail_data")
 
-        workbook = writer.book
         data_ws = writer.sheets["kpi_chart_data"]
         chart_ws = workbook.add_worksheet("kpi_charts")
 
@@ -360,7 +488,7 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFra
 
         for chart_name in chart_order:
             group = chart_df[chart_df["chart"] == chart_name]
-        for chart_name, group in chart_df.groupby("chart", sort=False):
+
             rows = group.index.to_list()
             if not rows:
                 continue
@@ -384,45 +512,4 @@ def kpi_report_to_excel_bytes(kpi_payload: dict[str, Any], detail_df: pd.DataFra
                 col_cursor = 0
                 row_cursor += 16
 
-        if layout_mode == "detailed" and detail_df is not None and not detail_df.empty:
-            overview_ws = workbook.add_worksheet("overview")
-            overview_ws.write(0, 0, "KPI Charts")
-
-            chart_row, chart_col = 1, 0
-            for chart_name in chart_order:
-                group = chart_df[chart_df["chart"] == chart_name]
-                rows = group.index.to_list()
-                if not rows:
-                    continue
-                excel_rows = [r + 1 for r in rows]
-                pie = workbook.add_chart({"type": "pie"})
-                pie.add_series(
-                    {
-                        "name": chart_name,
-                        "categories": ["kpi_chart_data", excel_rows[0], 1, excel_rows[-1], 1],
-                        "values": ["kpi_chart_data", excel_rows[0], 2, excel_rows[-1], 2],
-                        "data_labels": {"percentage": True, "category": True},
-                    }
-                )
-                pie.set_title({"name": chart_name})
-                pie.set_style(10)
-                overview_ws.insert_chart(chart_row, chart_col, pie, {"x_scale": 1.0, "y_scale": 1.0})
-                chart_col += 8
-                if chart_col >= max_cols * 8:
-                    chart_col = 0
-                    chart_row += 16
-
-            overview_table = _build_detailed_overview_table(detail_df)
-            table_start_row = chart_row + 17
-            _style_overview_worksheet(overview_ws, overview_table, table_start_row, workbook)
-
-            hub_series = detail_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
-            for hub_name in sorted(hub_series.unique()):
-                hub_table = _build_hub_table(detail_df, hub_name)
-                if hub_table.empty:
-                    continue
-                sheet_name = f"HUB_{hub_name}"[:31]
-                hub_ws = workbook.add_worksheet(sheet_name)
-                _style_overview_worksheet(hub_ws, hub_table, 0, workbook)
-                
     return output.getvalue()
