@@ -150,6 +150,35 @@ def latest_route_assignment(events: list[dict[str, Any]]) -> str:
     return candidates[-1][2]
 
 
+def extract_all_route_assignments(events: list[dict[str, Any]]) -> list[str]:
+    routes: list[str] = []
+    seen: set[str] = set()
+    for event in events:
+        route_name = parse_route(event_description(event))
+        normalized = route_name.strip()
+        if not normalized:
+            continue
+        lowered = normalized.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        routes.append(normalized)
+    return routes
+
+
+def choose_primary_route(ofd_route: str, failed_route: str, success_route: str, fallback_route: str) -> str:
+    """Pick the primary route for KPI attribution.
+
+    Delivery-rate denominator should follow the route that actually attempted OFD first,
+    instead of the latest reassignment route.
+    """
+    for route_name in (ofd_route, failed_route, success_route, fallback_route):
+        candidate = str(route_name or "").strip()
+        if candidate:
+            return candidate
+    return ""
+
+
 
 def extract_route_parts(route_name: str) -> list[str]:
     text = str(route_name or "").strip()
@@ -618,6 +647,7 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     fail_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
     success_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
     latest_route = latest_route_assignment(events)
+    route_assignments = extract_all_route_assignments(events)
     
     created_time = to_local_dt(event_ts(created_evt) if created_evt else None)
     first_scanned_time = to_local_dt(event_ts(first_scanned_evt) if first_scanned_evt else None)
@@ -625,6 +655,16 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     out_for_delivery_time = to_local_dt(event_ts(ofd_evt) if ofd_evt else None)
     attempted_time = to_local_dt(event_ts(fail_evt) if fail_evt else None)
     delivered_time = to_local_dt(event_ts(success_evt) if success_evt else None)
+
+    failed_route = parse_route(event_description(fail_evt)) if fail_evt else ""
+    success_route = parse_route(event_description(success_evt)) if success_evt else ""
+    ofd_route = parse_route(event_description(ofd_evt)) if ofd_evt else ""
+    primary_route = choose_primary_route(
+        ofd_route=ofd_route,
+        failed_route=failed_route,
+        success_route=success_route,
+        fallback_route=latest_route,
+    )
 
     row: dict[str, str] = {
         "tracking_id": tracking_id,
@@ -636,18 +676,19 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
             or payload.get("response", {}).get("shipperName")
             or ""
         ),
-        "has_customer_service": "1" if customer_service_hit else "0",
+        "has_customer_service": "true" if customer_service_hit else "false",
         "Hub": scan_hub,
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
         "last_scanned_time": fmt_dt(last_scanned_time),
         "out_for_delivery_time": fmt_dt(out_for_delivery_time),
         "attempted_time": fmt_dt(attempted_time),
-        "failed_route": parse_route(event_description(fail_evt)) if fail_evt else "",
+        "failed_route": failed_route,
         "delivered_time": fmt_dt(delivered_time),
-        "success_route": parse_route(event_description(success_evt)) if success_evt else "",
-        "ofd_route": parse_route(event_description(ofd_evt)) if ofd_evt else "",
-        "Route_name": latest_route,
+        "success_route": success_route,
+        "ofd_route": ofd_route,
+        "Route_name": primary_route,
+        "Route_names": " | ".join(route_assignments),
         "创建到入库时间": diff_hours(first_scanned_time, created_time),
         "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
         "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
