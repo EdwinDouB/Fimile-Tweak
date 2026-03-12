@@ -907,12 +907,17 @@ def main() -> None:
 
 
         if st.session_state.get("date_filter_type") == "delivery":
+            ofd_dt = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
+            start_ts = pd.Timestamp(start_d)
+            end_ts = pd.Timestamp(end_d) + pd.Timedelta(days=1)
             filtered_df = filtered_df[
-                filtered_df["out_for_delivery_time"].notna()
-                & filtered_df["out_for_delivery_time"].astype(str).str.strip().ne("")
+                ofd_dt.notna()
+                & (ofd_dt >= start_ts)
+                & (ofd_dt < end_ts)
             ]
 
-        non_pickup_filtered_df, pickup_filtered_df = split_pickup_routes(filtered_df)
+        non_pickup_filtered_df, _ = split_pickup_routes(filtered_df)
+        filtered_df = non_pickup_filtered_df.copy()
 
         layout_mode = st.radio(
             tr("layout_mode_label"),
@@ -966,31 +971,7 @@ def main() -> None:
         else:
             st.dataframe(invalid_route_df, use_container_width=True)
 
-        st.subheader(tr("pickup_section"))
-        if pickup_filtered_df.empty:
-            st.info(tr("pickup_empty"))
-        else:
-            pickup_display_cols = [
-                "tracking_id",
-                "Region",
-                "State",
-                "Driver",
-                "Hub",
-                "Contractor",
-                "Route_name",
-                "out_for_delivery_time",
-                "delivered_time",
-            ]
-            pickup_display_df = pickup_filtered_df[[c for c in pickup_display_cols if c in pickup_filtered_df.columns]].copy()
-            st.dataframe(pickup_display_df, use_container_width=True)
-            st.download_button(
-                tr("download_pickup"),
-                data=pickup_display_df.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"pickup_routes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv",
-            )
-
-        delivered_df = non_pickup_filtered_df[non_pickup_filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
+        delivered_df = filtered_df[filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
         if not delivered_df.empty:
             delivered_df["_delivered_dt"] = pd.to_datetime(delivered_df["delivered_time"], errors="coerce")
             delivered_df = delivered_df.sort_values(by=["_delivered_dt", "tracking_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])

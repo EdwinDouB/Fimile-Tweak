@@ -4,7 +4,6 @@ from typing import Any
 import os
 import io 
 import re 
-from difflib import SequenceMatcher
 
 from utils.utils import *
 from utils.constants import * 
@@ -25,6 +24,7 @@ REGION_BY_HUB = {
     "EDS": "EA",
     "ATL": "EA",
     "MIA": "EA",
+    "ORL": "EA",
     "ONT": "WE",
     "HOU": "WE",
     "WDR": "WE",
@@ -46,7 +46,7 @@ STATE_ALIAS = {
 
 
 HUB_ALIAS = {
-    "GIA": "MIA",
+    "GIA": "ORL",
 }
 
 HUB_BY_STATE = {
@@ -76,7 +76,7 @@ KNOWN_DSP_CONTRACTORS = [
     "LXE",
     "YLL",
     "EOI",
-    "FFI",
+    "FF1",
     "EFB",
     "SEL",
     "GHH",
@@ -88,29 +88,7 @@ KNOWN_DSP_CONTRACTORS = [
     "GIA",
     "MET",
     "FNM",
-    "GTF",
-    "FIMILE",
-    "STATELINK",
-    "YULIN",
-    "NOVI",
-    "ISAAC",
-    "DX",
 ]
-
-CONTRACTOR_KEYWORD_PATTERNS: list[tuple[str, str]] = [
-    (r"\bFINAL\s*MILE\b", "FNM"),
-    (r"\bFNM\b", "FNM"),
-    (r"\bFEDEX\b", "FEDEX"),
-    (r"\bGIA\b", "GIA"),
-    (r"\bMET\b", "MET"),
-    (r"\bSTATELINK\b", "STATELINK"),
-    (r"\bYULIN(?:\s+LOGISTICS(?:\s+USA\s+LLC)?)?\b", "YULIN"),
-    (r"\bFIMILE\b", "FIMILE"),
-    (r"\bNOVI\b", "NOVI"),
-    (r"\bISAAC\b", "ISAAC"),
-    (r"\bDX\b", "DX"),
-]
-
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -202,26 +180,6 @@ def normalize_contractor_name(contractor: str) -> str:
     return re.sub(r"[^A-Za-z0-9]", "", str(contractor or "").strip().upper())
 
 
-def _edit_distance(source: str, target: str) -> int:
-    if source == target:
-        return 0
-    if not source:
-        return len(target)
-    if not target:
-        return len(source)
-
-    previous = list(range(len(target) + 1))
-    for i, s_char in enumerate(source, start=1):
-        current = [i]
-        for j, t_char in enumerate(target, start=1):
-            insert_cost = current[j - 1] + 1
-            delete_cost = previous[j] + 1
-            replace_cost = previous[j - 1] + (0 if s_char == t_char else 1)
-            current.append(min(insert_cost, delete_cost, replace_cost))
-        previous = current
-    return previous[-1]
-
-
 def match_known_contractor(token: str) -> str:
     candidate = normalize_contractor_name(token)
     if not candidate:
@@ -229,26 +187,6 @@ def match_known_contractor(token: str) -> str:
 
     if candidate in KNOWN_DSP_CONTRACTORS:
         return candidate
-
-    best_match = ""
-    best_score = 0.0
-    best_distance = 10**9
-    for known in KNOWN_DSP_CONTRACTORS:
-        ratio = SequenceMatcher(None, candidate, known).ratio()
-        distance = _edit_distance(candidate, known)
-        if _is_single_adjacent_swap(candidate, known):
-            ratio = max(ratio, 0.9)
-            distance = min(distance, 1)
-        if candidate in known or known in candidate:
-            ratio = max(ratio, 0.85)
-        if ratio > best_score or (ratio == best_score and distance < best_distance):
-            best_score = ratio
-            best_match = known
-            best_distance = distance
-
-    max_distance = 1 if len(best_match) <= 3 else 2
-    if best_distance <= max_distance or best_score >= 0.72:
-        return best_match
     return ""
 
 
@@ -257,11 +195,33 @@ def extract_contractor_by_keywords(route_name: str) -> str:
     if not route_text:
         return ""
 
-    for pattern, contractor in CONTRACTOR_KEYWORD_PATTERNS:
+    special_patterns: list[tuple[str, str]] = [
+        (r"\bGTN\b", "GT"),
+        (r"\bEO\b", "EOI"),
+        (r"\bDX\b", "DRX"),
+        (r"\bFF\b", "FF1"),
+        (r"\bMET\b", "MET"),
+        (r"\bFNM\b", "FNM"),
+        (r"\bFINAL\s*MILE\b", "FNM"),
+        (r"\bYULIN\b", "YLL"),
+    ]
+    for pattern, contractor in special_patterns:
         if re.search(pattern, route_text):
             return contractor
-    return ""
 
+    for contractor in KNOWN_DSP_CONTRACTORS:
+        pattern = rf"(?<![A-Z0-9]){re.escape(contractor)}(?![A-Z0-9])"
+        if re.search(pattern, route_text):
+            return contractor
+
+    compact_route_text = re.sub(r"[^A-Z0-9]", "", route_text)
+    for contractor in sorted(KNOWN_DSP_CONTRACTORS, key=len, reverse=True):
+        if len(contractor) < 3:
+            continue
+        if contractor in compact_route_text:
+            return contractor
+
+    return ""
 
 
 def _is_single_adjacent_swap(source: str, target: str) -> bool:
@@ -318,8 +278,18 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     """
     parts = extract_route_parts(route_name)
     fallback_hub = infer_hub_from_state(fallback_state)
-    if len(parts) < 2:
+    route_text = str(route_name or "").upper()
 
+    is_pickup_route = bool(re.search(r"\bPU\b", route_text) or re.search(r"\bPICK\s*UP\b", route_text))
+    if is_pickup_route:
+        return {
+            "Hub": "PU",
+            "Contractor": "",
+            "Driver": "",
+            "Route_type": "pickup",
+        }
+
+    if len(parts) < 2:
         return {
             "Hub": fallback_hub,
             "Contractor": "",
@@ -371,17 +341,19 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
     if contractor and not match_known_contractor(contractor):
         contractor = ""
 
-    keyword_contractor = extract_contractor_by_keywords(route_name)
-    if not contractor:
-        contractor = keyword_contractor
-    elif keyword_contractor == "FNM":
-        # Keep explicit "Final Mile" mapping stable even if fuzzy matching guessed another token.
-        contractor = "FNM"
+    if re.search(r"\bGIA\b", route_text):
+        hub = "ORL"
+        contractor = "GIA"
+    elif re.search(r"\bMIA\b", route_text):
+        hub = "MIA"
+        contractor = "GT"
 
-    # MIA routes are handled by GTF only.
-    route_text = str(route_name or "").upper()
-    if not contractor and re.search(r"\bMIA\b", route_text):
-        contractor = "GTF"
+    keyword_contractor = extract_contractor_by_keywords(route_name)
+    if keyword_contractor:
+        contractor = keyword_contractor
+
+    if normalize_state(fallback_state) == "IL" and contractor != "MET":
+        contractor = contractor or "IL"
 
     route_type = "pickup" if hub == "PU" else "delivery"
 
@@ -778,11 +750,18 @@ def split_pickup_routes(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
         return df.copy(), df.copy()
 
     hub_series = df["Hub"].fillna("").astype(str).str.strip().str.upper()
+    route_name_series = df.get("Route_name", "").fillna("").astype(str).str.upper()
     if "Route_type" in df.columns:
         route_type_series = df["Route_type"].fillna("").astype(str).str.strip().str.lower()
     else:
         route_type_series = pd.Series("", index=df.index)
-    pickup_mask = hub_series.eq("PU") | route_type_series.eq("pickup")
+
+    pickup_mask = (
+        hub_series.eq("PU")
+        | route_type_series.eq("pickup")
+        | route_name_series.str.contains(r"\bPU\b", regex=True)
+        | route_name_series.str.contains(r"\bPICK\s*UP\b", regex=True)
+    )
 
     pickup_df = df.loc[pickup_mask].copy()
     non_pickup_df = df.loc[~pickup_mask].copy()
@@ -853,9 +832,8 @@ def build_customer_address_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_invalid_route_summary(df: pd.DataFrame) -> pd.DataFrame:
     invalid_mask = (
-        df["Route_name"].fillna("").astype(str).str.strip().eq("")
-        | df["Hub"].fillna("").astype(str).str.strip().eq("")
-        | df["Contractor"].fillna("").astype(str).str.strip().eq("")
+        df["Route_name"].fillna("").astype(str).str.strip().ne("")
+        & df["Contractor"].fillna("").astype(str).str.strip().eq("")
     )
     invalid_df = df.loc[invalid_mask, ["tracking_id", "Route_name"]].copy()
     if invalid_df.empty:
