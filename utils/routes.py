@@ -84,7 +84,31 @@ KNOWN_DSP_CONTRACTORS = [
     "NWB",
     "BXI",
     "KAT",
-    "Fedex",
+    "FEDEX",
+    "GIA",
+    "MET",
+    "FNM",
+    "GTF",
+    "FIMILE",
+    "STATELINK",
+    "YULIN",
+    "NOVI",
+    "ISAAC",
+    "DX",
+]
+
+CONTRACTOR_KEYWORD_PATTERNS: list[tuple[str, str]] = [
+    (r"\bFINAL\s*MILE\b", "FNM"),
+    (r"\bFNM\b", "FNM"),
+    (r"\bFEDEX\b", "FEDEX"),
+    (r"\bGIA\b", "GIA"),
+    (r"\bMET\b", "MET"),
+    (r"\bSTATELINK\b", "STATELINK"),
+    (r"\bYULIN(?:\s+LOGISTICS(?:\s+USA\s+LLC)?)?\b", "YULIN"),
+    (r"\bFIMILE\b", "FIMILE"),
+    (r"\bNOVI\b", "NOVI"),
+    (r"\bISAAC\b", "ISAAC"),
+    (r"\bDX\b", "DX"),
 ]
 
 
@@ -228,6 +252,17 @@ def match_known_contractor(token: str) -> str:
     return ""
 
 
+def extract_contractor_by_keywords(route_name: str) -> str:
+    route_text = str(route_name or "").upper()
+    if not route_text:
+        return ""
+
+    for pattern, contractor in CONTRACTOR_KEYWORD_PATTERNS:
+        if re.search(pattern, route_text):
+            return contractor
+    return ""
+
+
 
 def _is_single_adjacent_swap(source: str, target: str) -> bool:
     if len(source) != len(target):
@@ -335,6 +370,18 @@ def parse_route_identity(route_name: str, fallback_state: str = "") -> dict[str,
 
     if contractor and not match_known_contractor(contractor):
         contractor = ""
+
+    keyword_contractor = extract_contractor_by_keywords(route_name)
+    if not contractor:
+        contractor = keyword_contractor
+    elif keyword_contractor == "FNM":
+        # Keep explicit "Final Mile" mapping stable even if fuzzy matching guessed another token.
+        contractor = "FNM"
+
+    # MIA routes are handled by GTF only.
+    route_text = str(route_name or "").upper()
+    if not contractor and re.search(r"\bMIA\b", route_text):
+        contractor = "GTF"
 
     route_type = "pickup" if hub == "PU" else "delivery"
 
