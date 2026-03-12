@@ -318,11 +318,6 @@ def build_kpi_report_payload(
     ]
     existing_pod_columns = [col for col in pod_review_export_columns if col in pod_review_table.columns]
     pod_review_export_df = pod_review_table[existing_pod_columns].copy() if existing_pod_columns else pd.DataFrame(columns=pod_review_export_columns)
-    pod_review_by_hub: dict[str, pd.DataFrame] = {}
-    if not pod_review_export_df.empty and "Hub" in pod_review_export_df.columns:
-        hub_series = pod_review_export_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
-        for hub_name in sorted(hub_series.unique()):
-            pod_review_by_hub[str(hub_name)] = pod_review_export_df[hub_series == hub_name].copy()
 
     attempt_base = non_pickup_df[ofd_present_mask].copy()
     attempt_base["ofd_to_attempted_hours"] = (attempt_base["attempted_dt"] - attempt_base["ofd_dt"]).dt.total_seconds() / 3600
@@ -420,7 +415,6 @@ def build_kpi_report_payload(
         "has_monthly_lost_data": not monthly_lost.empty,
         "monthly_lost": monthly_lost,
         "pod_review_df": pod_review_export_df,
-        "pod_review_by_hub": pod_review_by_hub,
     }
 
 def kpi_report_to_excel_bytes(
@@ -490,16 +484,6 @@ def kpi_report_to_excel_bytes(
         pod_review_df = kpi_payload.get("pod_review_df")
         if isinstance(pod_review_df, pd.DataFrame):
             pod_review_df.to_excel(writer, index=False, sheet_name="pod_review_data")
-            pod_review_df.to_excel(writer, index=False, sheet_name="POD审核")
-        pod_review_by_hub = kpi_payload.get("pod_review_by_hub")
-        if isinstance(pod_review_by_hub, dict):
-            for hub_name, hub_df in pod_review_by_hub.items():
-                if not isinstance(hub_df, pd.DataFrame):
-                    continue
-                sheet_name = _sanitize_sheet_name(f"POD_{hub_name}")
-                if not sheet_name or sheet_name in writer.sheets:
-                    continue
-                hub_df.to_excel(writer, index=False, sheet_name=sheet_name)
 
         data_ws = writer.sheets["kpi_chart_data"]
         chart_ws = workbook.add_worksheet("kpi_charts")
@@ -515,9 +499,8 @@ def kpi_report_to_excel_bytes(
         if detail_df is not None and not detail_df.empty:
             detail_ws = writer.sheets["detail_data"]
             detail_ws.set_column(0, max(len(detail_df.columns) - 1, 0), 20)
-        for sheet_name, pod_ws in writer.sheets.items():
-            if not sheet_name.startswith("POD") and sheet_name != "pod_review_data":
-                continue
+        if "pod_review_data" in writer.sheets:
+            pod_ws = writer.sheets["pod_review_data"]
             pod_ws.set_column(0, 8, 20)
             pod_ws.set_column(9, 9, 60)
             pod_ws.set_column(10, 12, 24)
