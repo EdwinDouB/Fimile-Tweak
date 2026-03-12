@@ -208,6 +208,19 @@ def extract_contractor_by_keywords(route_name: str) -> str:
     for pattern, contractor in special_patterns:
         if re.search(pattern, route_text):
             return contractor
+    for contractor in KNOWN_DSP_CONTRACTORS:
+        pattern = rf"(?<![A-Z0-9]){re.escape(contractor)}(?![A-Z0-9])"
+        if re.search(pattern, route_text):
+            return contractor
+
+    compact_route_text = re.sub(r"[^A-Z0-9]", "", route_text)
+    for contractor in sorted(KNOWN_DSP_CONTRACTORS, key=len, reverse=True):
+        if len(contractor) < 3:
+            continue
+        if contractor in compact_route_text:
+            return contractor
+
+    return ""
 
     for contractor in KNOWN_DSP_CONTRACTORS:
         pattern = rf"(?<![A-Z0-9]){re.escape(contractor)}(?![A-Z0-9])"
