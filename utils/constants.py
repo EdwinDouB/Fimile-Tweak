@@ -12,6 +12,7 @@ OUTPUT_COLUMNS = [
     "Hub",
     "Contractor",
     "Route_name",
+    "Route_names",
     "Route_type",
     "has_customer_service",
     "created_time",
