@@ -14,32 +14,6 @@ import requests
 import streamlit as st
 
 
-def render_compliance_section(title: str, delivered_df: pd.DataFrame, state_key_prefix: str) -> None:
-    st.subheader(title)
-    if delivered_df.empty:
-        st.info(tr("no_delivered"))
-        return
-
-    header_cols = st.columns([2, 2, 5, 2])
-    header_cols[0].markdown(f"**{tr('delivered_date')}**")
-    header_cols[1].markdown(f"**{tr('tracking_id')}**")
-    header_cols[2].markdown(f"**{tr('beans_link')}**")
-    header_cols[3].markdown(f"**{tr('compliant')}**")
-
-    for idx, row in delivered_df.iterrows():
-        tracking_id = str(row.get("tracking_id") or "")
-        delivered_time = str(row.get("delivered_time") or "")
-        compliant = st.session_state["pod_compliance_map"].get(tracking_id, False)
-
-        cols = st.columns([2, 2, 5, 2])
-        cols[0].write(delivered_time)
-        cols[1].write(tracking_id)
-        cols[2].markdown(f"[{tr('open_beans')}]({build_beans_tracking_link(tracking_id)})")
-        btn_label = "✅" if compliant else "❌"
-        if cols[3].button(btn_label, key=f"{state_key_prefix}_toggle_{idx}_{tracking_id}", use_container_width=True):
-            st.session_state["pod_compliance_map"][tracking_id] = not compliant
-            st.rerun()
-
 def render_percentage_pie(
     title: str,
     hit_count: int,
@@ -296,7 +270,6 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     kpi_payload = build_kpi_report_payload(
         result_df,
         fetch_reference_time=fetch_reference_time,
-        pod_compliance_map=st.session_state.get("pod_compliance_map", {}),
     )
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
@@ -640,8 +613,6 @@ def main() -> None:
         st.session_state["result_df"] = None
     if "failures" not in st.session_state:
         st.session_state["failures"] = []
-    if "pod_compliance_map" not in st.session_state:
-        st.session_state["pod_compliance_map"] = {}
     if "region_filter" not in st.session_state:
         st.session_state["region_filter"] = "ALL"
     if "state_filter" not in st.session_state:
@@ -763,14 +734,6 @@ def main() -> None:
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
-
-        compliance_map: dict[str, bool] = {}
-        for _, row in result_df.iterrows():
-            tracking_id = str(row.get("tracking_id") or "")
-            if not tracking_id:
-                continue
-            compliance_map[tracking_id] = auto_is_pod_compliant(row)
-        st.session_state["pod_compliance_map"] = compliance_map
 
         status.text(tr("done"))
 
@@ -971,11 +934,6 @@ def main() -> None:
         else:
             st.dataframe(invalid_route_df, use_container_width=True)
 
-        delivered_df = filtered_df[filtered_df["delivered_time"].astype(str).str.strip() != ""].copy()
-        if not delivered_df.empty:
-            delivered_df["_delivered_dt"] = pd.to_datetime(delivered_df["delivered_time"], errors="coerce")
-            delivered_df = delivered_df.sort_values(by=["_delivered_dt", "tracking_id"], ascending=[False, True]).drop(columns=["_delivered_dt"])
-
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         export_df = build_layout_specific_export_df(filtered_df, layout_mode)
         csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
@@ -1004,9 +962,6 @@ def main() -> None:
             )
         except Exception:
             c_report.warning(tr("report_dep_missing"))
-
-        render_compliance_section(tr("pod_review"), delivered_df, "pod_review")
-        render_compliance_section(tr("delivered"), delivered_df, "delivered")
 
 
 if __name__ == "__main__":

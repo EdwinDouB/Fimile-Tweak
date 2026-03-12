@@ -1,7 +1,6 @@
 from utils.utils import to_datetime_series, rate
 from datetime import datetime, timezone
 from utils.routes import split_pickup_routes, build_lost_package_analysis
-from utils.routes import auto_is_pod_compliant
 from typing import Any
 import pandas as pd
 import io 
@@ -221,7 +220,6 @@ def _insert_dashboard_charts(
 def build_kpi_report_payload(
     result_df: pd.DataFrame,
     fetch_reference_time: datetime | None = None,
-    pod_compliance_map: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
     df = result_df.copy()
     df["created_dt"] = to_datetime_series(df, "created_time")
@@ -295,47 +293,43 @@ def build_kpi_report_payload(
             ]
         )
 
-    manual_map = pod_compliance_map or {}
-
-    def _resolve_pod_compliance(row: pd.Series) -> bool:
-        tracking_id = str(row.get("tracking_id") or "").strip()
-        if tracking_id and tracking_id in manual_map:
-            return bool(manual_map[tracking_id])
-        return auto_is_pod_compliant(row)
-
-    pod_compliant_mask = delivered_within_24h.apply(_resolve_pod_compliance, axis=1)
-    pod_total_count = len(delivered_within_24h)
-    pod_hit_count = int(pod_compliant_mask.sum())
-    pod_miss_count = max(pod_total_count - pod_hit_count, 0)
-    metrics.append(
-        {
-            "category": "dsp_assessment",
-            "metric": "POD compliance rate",
-            "hit": pod_hit_count,
-            "total": pod_total_count,
-            "rate": rate(pod_hit_count, pod_total_count),
-        }
-    )
-    chart_rows.extend(
-        [
-            {
-                "chart": "POD compliance rate",
-                "category": "POD compliant",
-                "count": pod_hit_count,
-                "rate": rate(pod_hit_count, pod_total_count),
-            },
-            {
-                "chart": "POD compliance rate",
-                "category": "Not POD compliant",
-                "count": pod_miss_count,
-                "rate": rate(pod_miss_count, pod_total_count),
-            },
-        ]
-    )
+    pod_review_table = delivered_within_24h.copy()
+    if not pod_review_table.empty:
+        pod_review_table["beans_link"] = pod_review_table["tracking_id"].astype(str).map(
+            lambda tid: f'=HYPERLINK("https://www.beansroute.ai/3pl-manager/tabs.html#searchTrackingId/{tid}", "Open Beans POD")'
+        )
+        pod_review_table["pod_manual_review"] = "Pending"
+        pod_review_table["exclude_from_24h_attempt"] = "No"
+        pod_review_table["pod_review_note"] = ""
+    pod_review_export_columns = [
+        "tracking_id",
+        "Region",
+        "State",
+        "Hub",
+        "Contractor",
+        "Route_name",
+        "out_for_delivery_time",
+        "attempted_time",
+        "delivered_time",
+        "beans_link",
+        "pod_manual_review",
+        "exclude_from_24h_attempt",
+        "pod_review_note",
+    ]
+    existing_pod_columns = [col for col in pod_review_export_columns if col in pod_review_table.columns]
+    pod_review_export_df = pod_review_table[existing_pod_columns].copy() if existing_pod_columns else pd.DataFrame(columns=pod_review_export_columns)
+    pod_review_by_hub: dict[str, pd.DataFrame] = {}
+    if not pod_review_export_df.empty and "Hub" in pod_review_export_df.columns:
+        hub_series = pod_review_export_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
+        for hub_name in sorted(hub_series.unique()):
+            pod_review_by_hub[str(hub_name)] = pod_review_export_df[hub_series == hub_name].copy()
 
     attempt_base = non_pickup_df[ofd_present_mask].copy()
     attempt_base["ofd_to_attempted_hours"] = (attempt_base["attempted_dt"] - attempt_base["ofd_dt"]).dt.total_seconds() / 3600
     attempt_base["ofd_to_delivered_hours"] = (attempt_base["delivered_dt"] - attempt_base["ofd_dt"]).dt.total_seconds() / 3600
+    failed_without_delivery_mask = attempt_base["attempted_dt"].notna() & attempt_base["delivered_dt"].isna()
+    failed_without_delivery_count = int(failed_without_delivery_mask.sum())
+    attempt_excluded_by_manual_review = 0
     attempt_hit_mask = (
         (attempt_base["delivered_dt"].notna())
         & (attempt_base["ofd_to_delivered_hours"] >= 0)
@@ -373,6 +367,24 @@ def build_kpi_report_payload(
             },
         ]
     )
+    metrics.extend(
+        [
+            {
+                "category": "pod_review",
+                "metric": "failed_without_delivery_count",
+                "hit": failed_without_delivery_count,
+                "total": attempt_total_count,
+                "rate": rate(failed_without_delivery_count, attempt_total_count),
+            },
+            {
+                "category": "pod_review",
+                "metric": "attempt_excluded_by_manual_review",
+                "hit": attempt_excluded_by_manual_review,
+                "total": attempt_total_count,
+                "rate": rate(attempt_excluded_by_manual_review, attempt_total_count),
+            },
+        ]
+    )
 
     
     lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
@@ -407,6 +419,8 @@ def build_kpi_report_payload(
         "charts": chart_rows,
         "has_monthly_lost_data": not monthly_lost.empty,
         "monthly_lost": monthly_lost,
+        "pod_review_df": pod_review_export_df,
+        "pod_review_by_hub": pod_review_by_hub,
     }
 
 def kpi_report_to_excel_bytes(
@@ -473,6 +487,20 @@ def kpi_report_to_excel_bytes(
         if detail_df is not None and not detail_df.empty:
             detail_df.to_excel(writer, index=False, sheet_name="detail_data")
 
+        pod_review_df = kpi_payload.get("pod_review_df")
+        if isinstance(pod_review_df, pd.DataFrame):
+            pod_review_df.to_excel(writer, index=False, sheet_name="pod_review_data")
+            pod_review_df.to_excel(writer, index=False, sheet_name="POD审核")
+        pod_review_by_hub = kpi_payload.get("pod_review_by_hub")
+        if isinstance(pod_review_by_hub, dict):
+            for hub_name, hub_df in pod_review_by_hub.items():
+                if not isinstance(hub_df, pd.DataFrame):
+                    continue
+                sheet_name = _sanitize_sheet_name(f"POD_{hub_name}")
+                if not sheet_name or sheet_name in writer.sheets:
+                    continue
+                hub_df.to_excel(writer, index=False, sheet_name=sheet_name)
+
         data_ws = writer.sheets["kpi_chart_data"]
         chart_ws = workbook.add_worksheet("kpi_charts")
 
@@ -487,6 +515,12 @@ def kpi_report_to_excel_bytes(
         if detail_df is not None and not detail_df.empty:
             detail_ws = writer.sheets["detail_data"]
             detail_ws.set_column(0, max(len(detail_df.columns) - 1, 0), 20)
+        for sheet_name, pod_ws in writer.sheets.items():
+            if not sheet_name.startswith("POD") and sheet_name != "pod_review_data":
+                continue
+            pod_ws.set_column(0, 8, 20)
+            pod_ws.set_column(9, 9, 60)
+            pod_ws.set_column(10, 12, 24)
 
         row_cursor = 0
         col_cursor = 0
