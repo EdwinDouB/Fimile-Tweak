@@ -159,7 +159,7 @@ def apply_manual_dimension_overrides(df: pd.DataFrame) -> pd.DataFrame:
 def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
     # scan time - created time and check how many hours 
     delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("metric") == "<24h delivery rate"), None)
-    pod_compliance_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "POD compliance rate"), None)
+    pod_compliance_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "Manual POD qualified rate"), None)
     attempt_24h_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "24h attempt rate"), None)
 
     st.markdown(f"#### {tr('compact_title')}")
@@ -180,19 +180,19 @@ def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
         c1.info("24h delivery share: no data available")
 
     if pod_compliance_metric:
-        c2.metric("POD Compliance Rate", f"{pod_compliance_metric['rate']:.2%}", f"{pod_compliance_metric['hit']}/{pod_compliance_metric['total']}")
+        c2.metric("Manual POD Qualified Rate", f"{pod_compliance_metric['rate']:.2%}", f"{pod_compliance_metric['hit']}/{pod_compliance_metric['total']}")
         render_percentage_pie(
-            title="POD Compliance Share",
+            title="Manual POD Review Share",
             hit_count=int(pod_compliance_metric["hit"]),
             total_count=int(pod_compliance_metric["total"]),
-            hit_label="POD compliant",
-            miss_label="Not POD compliant",
+            hit_label="Qualified",
+            miss_label="Not Qualified",
             chart_key="compact_pod_compliance",
             container=c2,
         )
     else:
-        c2.metric("POD Compliance Rate", "0.00%", "0/0")
-        c2.info("POD compliance share: no data available")
+        c2.metric("Manual POD Qualified Rate", "0.00%", "0/0")
+        c2.info("Manual POD review share: no data available")
 
     if attempt_24h_metric:
         c3.metric("24h Attempt Rate", f"{attempt_24h_metric['rate']:.2%}", f"{attempt_24h_metric['hit']}/{attempt_24h_metric['total']}")
@@ -473,7 +473,7 @@ def build_layout_specific_report_payload(kpi_payload: dict[str, Any], layout_mod
     if layout_mode != "compact":
         return kpi_payload
 
-    compact_metric_names = {"<24h delivery rate", "POD compliance rate", "24h attempt rate"}
+    compact_metric_names = {"<24h delivery rate", "Manual POD qualified rate", "24h attempt rate"}
     compact_metrics = [m for m in kpi_payload.get("metrics", []) if m.get("metric") in compact_metric_names]
     compact_charts = [c for c in kpi_payload.get("charts", []) if c.get("chart") in compact_metric_names]
 
