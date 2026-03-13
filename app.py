@@ -1,9 +1,9 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 
+import utils.db as db
 from utils.utils import *
 from utils.db import * 
-from utils.db import fetch_router_messages_map
 from utils.routes import *
 from utils.report import * 
 from utils.constants import * 
@@ -733,7 +733,7 @@ def main() -> None:
             sender_info_map = {}
 
         try:
-            router_messages_map = fetch_router_messages_map(tuple(dedup_ids))
+            router_messages_map = db.fetch_router_messages_map(tuple(dedup_ids))
         except Exception as e:
             st.warning(f"Failed to load router_messages from DB: {e}")
             router_messages_map = {}
