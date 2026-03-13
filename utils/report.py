@@ -4,6 +4,19 @@ from utils.routes import split_pickup_routes, build_lost_package_analysis
 from typing import Any
 import pandas as pd
 import io 
+from xlsxwriter.utility import xl_col_to_name
+
+
+def _resolve_ofd_column(df: pd.DataFrame) -> str:
+    if "first_out_for_delivery_date" in df.columns:
+        return "first_out_for_delivery_date"
+    return "out_for_delivery_time"
+
+
+def _yes_no_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.Series(["" for _ in range(len(df))], index=df.index, dtype="object")
+    return df[col].fillna("").astype(str).str.strip().str.lower()
 
 def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
     if detail_df is None or detail_df.empty:
@@ -11,7 +24,7 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
 
     source_df = detail_df.copy()
     if "out_for_delivery_time" in source_df.columns:
-        source_df["ofd_dt"] = to_datetime_series(source_df, "out_for_delivery_time")
+        source_df["ofd_dt"] = to_datetime_series(source_df, _resolve_ofd_column(source_df))
     else:
         source_df["ofd_dt"] = pd.NaT
     if "delivered_time" in source_df.columns:
@@ -61,7 +74,7 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str) -> pd.DataFrame:
     if hub_df.empty:
         return pd.DataFrame()
 
-    hub_df["ofd_dt"] = to_datetime_series(hub_df, "out_for_delivery_time")
+    hub_df["ofd_dt"] = to_datetime_series(hub_df, _resolve_ofd_column(hub_df))
     hub_df["delivered_dt"] = to_datetime_series(hub_df, "delivered_time")
     hub_df["ofd_to_delivered_hours"] = (hub_df["delivered_dt"] - hub_df["ofd_dt"]).dt.total_seconds() / 3600
     for threshold in [24, 48, 72]:
@@ -225,7 +238,7 @@ def build_kpi_report_payload(
     df["created_dt"] = to_datetime_series(df, "created_time")
     df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
     df["last_scanned_dt"] = to_datetime_series(df, "last_scanned_time")
-    df["ofd_dt"] = to_datetime_series(df, "out_for_delivery_time")
+    df["ofd_dt"] = to_datetime_series(df, _resolve_ofd_column(df))
     df["attempted_dt"] = to_datetime_series(df, "attempted_time")
     df["delivered_dt"] = to_datetime_series(df, "delivered_time")
     df["month"] = df["created_dt"].dt.to_period("M").astype(str)
@@ -359,12 +372,27 @@ def build_kpi_report_payload(
     pod_review_export_df = review_base[existing_pod_columns].copy() if existing_pod_columns else pd.DataFrame(columns=pod_review_export_columns)
 
     delivered_for_pod_review = review_base[review_base["stop_status"] == "Delivered"]
-    reviewed_delivered = delivered_for_pod_review[
-        delivered_for_pod_review["manual_pod_review_status"].isin(["Qualified", "Not Qualified"])
-    ]
-    pod_qualified_count = int((reviewed_delivered["manual_pod_review_status"] == "Qualified").sum())
-    reviewed_delivered_count = len(reviewed_delivered)
-    pod_not_qualified_count = max(reviewed_delivered_count - pod_qualified_count, 0)
+    pending_pod_count = int(
+        (
+            _yes_no_series(delivered_for_pod_review, "first_pod_complience").eq("")
+            & _yes_no_series(delivered_for_pod_review, "second_pod_complience").eq("")
+            & _yes_no_series(delivered_for_pod_review, "third_pod_complience").eq("")
+        ).sum()
+    )
+
+    pod_yes_count = int(
+        (_yes_no_series(review_base, "first_pod_complience") == "yes").sum()
+        + (_yes_no_series(review_base, "second_pod_complience") == "yes").sum()
+        + (_yes_no_series(review_base, "third_pod_complience") == "yes").sum()
+    )
+    pod_no_count = int(
+        (_yes_no_series(review_base, "first_pod_complience") == "no").sum()
+        + (_yes_no_series(review_base, "second_pod_complience") == "no").sum()
+        + (_yes_no_series(review_base, "third_pod_complience") == "no").sum()
+    )
+    reviewed_delivered_count = pod_yes_count + pod_no_count
+    pod_qualified_count = pod_yes_count
+    pod_not_qualified_count = pod_no_count
     metrics.append(
         {
             "category": "pod_manual_review",
@@ -378,9 +406,9 @@ def build_kpi_report_payload(
         {
             "category": "pod_manual_review",
             "metric": "pending_manual_pod_review_count",
-            "hit": int((delivered_for_pod_review["manual_pod_review_status"] == "Pending").sum()),
+            "hit": pending_pod_count,
             "total": len(delivered_for_pod_review),
-            "rate": rate(int((delivered_for_pod_review["manual_pod_review_status"] == "Pending").sum()), len(delivered_for_pod_review)),
+            "rate": rate(pending_pod_count, len(delivered_for_pod_review)),
         }
     )
     chart_rows.extend(
@@ -402,7 +430,10 @@ def build_kpi_report_payload(
 
     failed_without_delivery_count = int(failed_without_delivery_mask.sum())
     attempt_excluded_by_manual_review = int((failed_attempt_within_24h_mask & ~review_base["attempt_validated"]).sum())
-    attempt_hit_mask = delivered_within_24h_mask | (failed_attempt_within_24h_mask & review_base["attempt_validated"])
+    first_yes = _yes_no_series(review_base, "first_pod_complience") == "yes"
+    second_yes = _yes_no_series(review_base, "second_pod_complience") == "yes"
+    third_yes = _yes_no_series(review_base, "third_pod_complience") == "yes"
+    attempt_hit_mask = first_yes | second_yes | third_yes
     attempt_total_count = len(attempt_base)
     attempt_hit_count = int(attempt_hit_mask.sum())
     attempt_miss_count = max(attempt_total_count - attempt_hit_count, 0)
@@ -549,6 +580,43 @@ def kpi_report_to_excel_bytes(
         chart_df.to_excel(writer, index=False, sheet_name="kpi_chart_data")
         if detail_df is not None and not detail_df.empty:
             detail_df.to_excel(writer, index=False, sheet_name="detail_data")
+
+            if not chart_df.empty:
+                detail_columns = {name: idx for idx, name in enumerate(detail_df.columns)}
+                yes_cols = [
+                    detail_columns.get("first_pod_complience"),
+                    detail_columns.get("second_pod_complience"),
+                    detail_columns.get("third_pod_complience"),
+                ]
+                yes_cols = [idx for idx in yes_cols if idx is not None]
+                if yes_cols:
+                    total_rows = len(detail_df) + 1
+
+                    def _countif_sum(target: str) -> str:
+                        exprs = []
+                        for col_idx in yes_cols:
+                            col_name = xl_col_to_name(col_idx)
+                            exprs.append(f'COUNTIF(detail_data!${col_name}$2:${col_name}${total_rows},"{target}")')
+                        return "+".join(exprs) if exprs else "0"
+
+                    for ridx, rec in chart_df.iterrows():
+                        chart_name = str(rec.get("chart", ""))
+                        category = str(rec.get("category", "")).strip().lower()
+                        excel_row = ridx + 1
+                        if chart_name == "Manual POD qualified rate":
+                            if "not" in category:
+                                writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("No")}')
+                            else:
+                                writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("Yes")}')
+                        if chart_name == "24h attempt rate":
+                            if "no" in category:
+                                writer.sheets["kpi_chart_data"].write_formula(
+                                    excel_row,
+                                    2,
+                                    f'=MAX(COUNTA(detail_data!$A$2:$A${total_rows})-({_countif_sum("Yes")}),0)',
+                                )
+                            else:
+                                writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("Yes")}')
 
         pod_review_df = kpi_payload.get("pod_review_df")
         if isinstance(pod_review_df, pd.DataFrame):

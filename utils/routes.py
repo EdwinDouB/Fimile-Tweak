@@ -503,6 +503,13 @@ def event_ts(event: dict[str, Any]) -> int | None:
     return None
 
 
+
+
+def events_by_predicate(events: list[dict[str, Any]], predicate) -> list[dict[str, Any]]:
+    filtered = [e for e in events if predicate(e)]
+    with_ts = [(event_ts(e), idx, e) for idx, e in enumerate(filtered)]
+    with_ts.sort(key=lambda x: ((x[0] if x[0] is not None else -1), x[1]))
+    return [item[2] for item in with_ts]
 def first_event_by_predicate(events: list[dict[str, Any]], predicate) -> dict[str, Any] | None:
     filtered = [e for e in events if predicate(e)]
     if not filtered:
@@ -642,10 +649,14 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     first_scanned_evt = first_event_by_predicate(events, scanned_predicate)
     last_scanned_evt = last_event_by_predicate(events, scanned_predicate)
 
-    ofd_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"out-for-delivery", "ofd", "outfordelivery"})
+    ofd_events = events_by_predicate(events, lambda e: event_type(e) in {"out-for-delivery", "ofd", "outfordelivery"})
+    fail_events = events_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
+    success_events = events_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
+
+    ofd_evt = ofd_events[0] if ofd_events else None
     scan_hub = infer_hub_from_pre_ofd_scan(events, ofd_evt)
-    fail_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
-    success_evt = first_event_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
+    fail_evt = fail_events[0] if fail_events else None
+    success_evt = success_events[0] if success_events else None
     latest_route = latest_route_assignment(events)
     route_assignments = extract_all_route_assignments(events)
     
@@ -666,6 +677,20 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         fallback_route=latest_route,
     )
 
+    first_ofd_time = to_local_dt(event_ts(ofd_events[0])) if len(ofd_events) >= 1 else None
+    second_ofd_time = to_local_dt(event_ts(ofd_events[1])) if len(ofd_events) >= 2 else None
+    third_ofd_time = to_local_dt(event_ts(ofd_events[2])) if len(ofd_events) >= 3 else None
+    first_failed_time = to_local_dt(event_ts(fail_events[0])) if len(fail_events) >= 1 else None
+    second_failed_time = to_local_dt(event_ts(fail_events[1])) if len(fail_events) >= 2 else None
+    third_failed_time = to_local_dt(event_ts(fail_events[2])) if len(fail_events) >= 3 else None
+
+    def attempt_compliance(ofd_time, failed_time) -> str:
+        if ofd_time is None:
+            return ""
+        if failed_time is not None:
+            return "No"
+        return "Yes" if delivered_time is not None else ""
+
     row: dict[str, str] = {
         "tracking_id": tracking_id,
         "shipperName": str(
@@ -677,12 +702,23 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
             or ""
         ),
         "has_customer_service": "true" if customer_service_hit else "false",
+        "entered_costomer_service": "Yes" if customer_service_hit else "No",
         "Hub": scan_hub,
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
         "last_scanned_time": fmt_dt(last_scanned_time),
         "out_for_delivery_time": fmt_dt(out_for_delivery_time),
         "attempted_time": fmt_dt(attempted_time),
+        "first_out_for_delivery_date": fmt_dt(first_ofd_time),
+        "first_failed_date": fmt_dt(first_failed_time),
+        "first_pod_complience": attempt_compliance(first_ofd_time, first_failed_time),
+        "second_out_for_delivery_date": fmt_dt(second_ofd_time),
+        "second_failed_date": fmt_dt(second_failed_time),
+        "second_pod_complience": attempt_compliance(second_ofd_time, second_failed_time),
+        "third_out_for_delivery_date": fmt_dt(third_ofd_time),
+        "third_failed_date": fmt_dt(third_failed_time),
+        "third_pod_complience": attempt_compliance(third_ofd_time, third_failed_time),
+        "beans_pod_link": f'=HYPERLINK("https://www.beansroute.ai/3pl-manager/tabs.html#searchTrackingId/{tracking_id}", "Open Beans POD")',
         "failed_route": failed_route,
         "delivered_time": fmt_dt(delivered_time),
         "success_route": success_route,
