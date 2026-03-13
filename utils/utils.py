@@ -23,7 +23,7 @@ def read_config(key: str, default: str = "") -> str:
 
 
 def tr(key: str, **kwargs) -> str:
-    lang = st.session_state.get("lang", "zh")
+    lang = st.session_state.get("language", "zh")
     text = I18N.get(lang, I18N["zh"]).get(key, key)
     if kwargs:
         try:
