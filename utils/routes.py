@@ -691,6 +691,10 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
             return "No"
         return "Yes" if delivered_time is not None else ""
 
+    structured_identity = extract_route_identity_from_payload(payload)
+    route_name_value = str(structured_identity.get("Route_name") or primary_route or "").strip()
+    route_names_value = str(structured_identity.get("Route_names") or " | ".join(route_assignments)).strip()
+
     row: dict[str, str] = {
         "tracking_id": tracking_id,
         "shipperName": str(
@@ -703,7 +707,9 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         ),
         "has_customer_service": "true" if customer_service_hit else "false",
         "entered_costomer_service": "Yes" if customer_service_hit else "No",
-        "Hub": scan_hub,
+        "Driver": str(structured_identity.get("Driver") or "").strip(),
+        "Hub": str(structured_identity.get("Hub") or scan_hub or "").strip(),
+        "Contractor": str(structured_identity.get("Contractor") or "").strip(),
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
         "last_scanned_time": fmt_dt(last_scanned_time),
@@ -723,8 +729,9 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         "delivered_time": fmt_dt(delivered_time),
         "success_route": success_route,
         "ofd_route": ofd_route,
-        "Route_name": primary_route,
-        "Route_names": " | ".join(route_assignments),
+        "Route_name": route_name_value,
+        "Route_names": route_names_value,
+        "Route_type": str(structured_identity.get("Route_type") or "").strip(),
         "创建到入库时间": diff_hours(first_scanned_time, created_time),
         "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
         "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
@@ -745,6 +752,79 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         row[f"pod_score_{i}"] = str(q.get("score") or "").strip()
 
     return row
+
+
+def _find_values_by_key(obj: Any, key: str, limit: int = 5) -> list[Any]:
+    results: list[Any] = []
+
+    def _walk(node: Any) -> None:
+        if len(results) >= limit:
+            return
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k == key and v not in (None, ""):
+                    results.append(v)
+                    if len(results) >= limit:
+                        return
+                _walk(v)
+                if len(results) >= limit:
+                    return
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+                if len(results) >= limit:
+                    return
+
+    _walk(obj)
+    return results
+
+
+def _first_non_empty(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def extract_route_identity_from_payload(payload: dict[str, Any]) -> dict[str, str]:
+    route_name = _first_non_empty(
+        *(_find_values_by_key(payload, "routeName", limit=2)),
+        *(_find_values_by_key(payload, "listRouteName", limit=2)),
+        *(_find_values_by_key(payload, "route", limit=2)),
+    )
+    assignee_name = _first_non_empty(
+        *(_find_values_by_key(payload, "assigneeName", limit=2)),
+        *(_find_values_by_key(payload, "driverName", limit=2)),
+        *(_find_values_by_key(payload, "name", limit=2)),
+    )
+    warehouse_name = _first_non_empty(
+        *(_find_values_by_key(payload, "warehouseName", limit=2)),
+        *(_find_values_by_key(payload, "warehouse", limit=2)),
+        *(_find_values_by_key(payload, "hub", limit=2)),
+    )
+    company_name = _first_non_empty(
+        *(_find_values_by_key(payload, "companyName", limit=2)),
+        *(_find_values_by_key(payload, "thirdPartyCompanyName", limit=2)),
+        *(_find_values_by_key(payload, "contractor", limit=2)),
+    )
+
+    fallback = parse_route_identity(route_name, fallback_state="") if route_name else {"Hub": "", "Contractor": "", "Driver": "", "Route_type": ""}
+    hub = normalize_hub_name(warehouse_name or fallback.get("Hub", ""))
+    contractor = company_name or fallback.get("Contractor", "")
+    driver = assignee_name or fallback.get("Driver", "")
+    route_type = "pickup" if (hub == "PU") else (fallback.get("Route_type", "delivery") or "delivery")
+
+    return {
+        "Route_name": route_name,
+        "Route_names": route_name,
+        "Driver": driver,
+        "Hub": hub,
+        "Contractor": contractor,
+        "Route_type": route_type,
+    }
 
 
 def empty_row(tracking_id: str) -> dict[str, str]:
@@ -821,12 +901,15 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         fallback_state = str(row.get("State") or row.get("sender_province") or "")
         route_info = parse_route_identity(route_name, fallback_state=fallback_state)
         df.at[idx, "Route_name"] = route_name
-        df.at[idx, "Driver"] = route_info["Driver"]
+        existing_driver = str(row.get("Driver") or "").strip()
+        df.at[idx, "Driver"] = existing_driver or route_info["Driver"]
         fallback_hub = normalize_hub_name(row.get("Hub") or "", fallback_state=fallback_state)
         parsed_hub = normalize_hub_name(route_info["Hub"], fallback_state=fallback_state)
-        df.at[idx, "Hub"] = parsed_hub or fallback_hub
-        df.at[idx, "Contractor"] = route_info["Contractor"]
-        df.at[idx, "Route_type"] = route_info["Route_type"]
+        df.at[idx, "Hub"] = fallback_hub or parsed_hub
+        existing_contractor = str(row.get("Contractor") or "").strip()
+        df.at[idx, "Contractor"] = existing_contractor or route_info["Contractor"]
+        existing_route_type = str(row.get("Route_type") or "").strip()
+        df.at[idx, "Route_type"] = existing_route_type or route_info["Route_type"]
     return df
 
 

@@ -1,16 +1,13 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
-from threading import local
 
 from utils.utils import *
 from utils.db import * 
 from utils.routes import *
 from utils.report import * 
-from utils.api import * 
 from utils.constants import * 
 
 import pandas as pd
-import requests
 import streamlit as st
 
 
@@ -560,6 +557,7 @@ def process_tracking_ids(
     dedup_ids: list[str],
     receive_province_map: dict[str, str],
     sender_info_map: dict[str, dict[str, str]],
+    router_messages_map: dict[str, Any],
     progress_bar,
     status_text,
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
@@ -573,20 +571,15 @@ def process_tracking_ids(
 
     total = len(dedup_ids)
     completed = 0
-    thread_local = local()
-    headers = build_api_headers()
-
     def worker(tracking_id: str) -> tuple[str, dict[str, str], dict[str, str] | None]:
-        if not hasattr(thread_local, "session"):
-            thread_local.session = requests.Session()
-
         try:
-            payload = fetch_tracking_data(tracking_id, thread_local.session, headers)
+            payload = router_messages_map.get(tracking_id)
+            if payload is None:
+                return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": "router_messages not found in DB"}
+            if not isinstance(payload, dict):
+                return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": "router_messages is not valid JSON object"}
             row = build_row(tracking_id, payload)
             return tracking_id, row, None
-        except requests.HTTPError as e:
-            code = e.response.status_code if e.response is not None else "N/A"
-            return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": f"HTTP {code}"}
         except Exception as e:  # noqa: BLE001
             return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": str(e)}
 
@@ -726,6 +719,7 @@ def main() -> None:
         failures: list[dict[str, str]] = []
         receive_province_map: dict[str, str] = {}
         sender_info_map: dict[str, dict[str, str]] = {}
+        router_messages_map: dict[str, Any] = {}
 
         try:
             receive_province_map = fetch_receive_province_map(tuple(dedup_ids))
@@ -737,6 +731,12 @@ def main() -> None:
         except Exception:
             sender_info_map = {}
 
+        try:
+            router_messages_map = fetch_router_messages_map(tuple(dedup_ids))
+        except Exception as e:
+            st.warning(f"Failed to load router_messages from DB: {e}")
+            router_messages_map = {}
+
         progress = st.progress(0)
         status = st.empty()
 
@@ -744,6 +744,7 @@ def main() -> None:
             dedup_ids=dedup_ids,
             receive_province_map=receive_province_map,
             sender_info_map=sender_info_map,
+            router_messages_map=router_messages_map,
             progress_bar=progress,
             status_text=status,
         )

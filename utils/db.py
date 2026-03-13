@@ -1,6 +1,8 @@
 from utils.utils import *
 import streamlit as st
 from datetime import date, datetime, time, timedelta
+import json
+from typing import Any
 
 
 from dotenv import load_dotenv
@@ -228,3 +230,80 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
         conn.close()
 
     return sender_info_map
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
+    """Load latest cached router_messages JSON from transit_third_party_cache by tracking_number."""
+    _require_db_env()
+
+    try:
+        import pymysql  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Missing dependency: pymysql. Please run: pip install pymysql") from e
+
+    if not tracking_ids:
+        return {}
+
+    tracking_ids_clean = tuple(str(tid).strip() for tid in tracking_ids if str(tid).strip())
+    if not tracking_ids_clean:
+        return {}
+
+    config = _load_mysql_config()
+    conn = pymysql.connect(
+        host=str(config["host"]),
+        port=int(config["port"]),
+        user=str(config["username"]),
+        password=str(config["password"]),
+        database=str(config["database"]),
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+    )
+
+    payload_map: dict[str, Any] = {}
+    try:
+        with conn.cursor() as cur:
+            chunk_size = 500
+            for i in range(0, len(tracking_ids_clean), chunk_size):
+                chunk = tracking_ids_clean[i : i + chunk_size]
+                placeholders = ", ".join(["%s"] * len(chunk))
+                sql = f"""
+                    SELECT tracking_number, router_messages, created_at
+                    FROM transit_third_party_cache
+                    WHERE tracking_number IN ({placeholders})
+                    AND router_messages IS NOT NULL
+                    ORDER BY tracking_number ASC, created_at DESC
+                """
+                cur.execute(sql, chunk)
+
+                while True:
+                    rows = cur.fetchmany(DB_FETCH_BATCH_SIZE)
+                    if not rows:
+                        break
+                    for row in rows:
+                        tracking_number = str(row.get("tracking_number") or "").strip()
+                        if not tracking_number or tracking_number in payload_map:
+                            continue
+
+                        raw_payload = row.get("router_messages")
+                        if raw_payload is None:
+                            continue
+
+                        if isinstance(raw_payload, (dict, list)):
+                            payload_map[tracking_number] = raw_payload
+                            continue
+
+                        text_payload = str(raw_payload).strip()
+                        if not text_payload:
+                            continue
+
+                        try:
+                            payload_map[tracking_number] = json.loads(text_payload)
+                        except json.JSONDecodeError:
+                            # Keep as raw text so upper layer can report parse failure.
+                            payload_map[tracking_number] = text_payload
+    finally:
+        conn.close()
+
+    return payload_map
