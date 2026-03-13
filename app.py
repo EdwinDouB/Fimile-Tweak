@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta
 
 from utils.utils import *
 from utils.db import * 
+from utils.db import fetch_router_messages_map
 from utils.routes import *
 from utils.report import * 
 from utils.constants import * 
