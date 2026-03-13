@@ -235,10 +235,11 @@ def build_kpi_report_payload(
     fetch_reference_time: datetime | None = None,
 ) -> dict[str, Any]:
     df = result_df.copy()
+    ofd_col = _resolve_ofd_column(df)
     df["created_dt"] = to_datetime_series(df, "created_time")
     df["first_scanned_dt"] = to_datetime_series(df, "first_scanned_time")
     df["last_scanned_dt"] = to_datetime_series(df, "last_scanned_time")
-    df["ofd_dt"] = to_datetime_series(df, _resolve_ofd_column(df))
+    df["ofd_dt"] = to_datetime_series(df, ofd_col)
     df["attempted_dt"] = to_datetime_series(df, "attempted_time")
     df["delivered_dt"] = to_datetime_series(df, "delivered_time")
     df["month"] = df["created_dt"].dt.to_period("M").astype(str)
@@ -249,7 +250,8 @@ def build_kpi_report_payload(
     chart_rows: list[dict[str, Any]] = []
 
     non_pickup_df["ofd_to_delivered_hours"] = (non_pickup_df["delivered_dt"] - non_pickup_df["ofd_dt"]).dt.total_seconds() / 3600
-    ofd_present_mask = non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne("")
+    ofd_series = non_pickup_df.get(ofd_col, pd.Series("", index=non_pickup_df.index))
+    ofd_present_mask = ofd_series.notna() & ofd_series.astype(str).str.strip().ne("")
     ofd_base = non_pickup_df[ofd_present_mask].copy()
 
     delivered_within_24h = ofd_base[
@@ -360,7 +362,7 @@ def build_kpi_report_payload(
         "delivery_status",
         "event_code",
         "event_readable",
-        "out_for_delivery_time",
+        ofd_col,
         "attempted_time",
         "delivered_time",
         "beans_link",
@@ -369,7 +371,11 @@ def build_kpi_report_payload(
         "attempt_validated",
     ]
     existing_pod_columns = [col for col in pod_review_export_columns if col in review_base.columns]
-    pod_review_export_df = review_base[existing_pod_columns].copy() if existing_pod_columns else pd.DataFrame(columns=pod_review_export_columns)
+    pod_review_export_df = (
+        review_base[existing_pod_columns].copy() if existing_pod_columns else pd.DataFrame(columns=pod_review_export_columns)
+    )
+    if ofd_col in pod_review_export_df.columns and ofd_col != "out_for_delivery_time":
+        pod_review_export_df = pod_review_export_df.rename(columns={ofd_col: "out_for_delivery_time"})
 
     delivered_for_pod_review = review_base[review_base["stop_status"] == "Delivered"]
     pending_pod_count = int(
