@@ -41,36 +41,56 @@ def _resolve_router_messages_table(conn: Any) -> str:
     candidates = [name.strip() for name in candidates if str(name).strip()]
 
     with conn.cursor() as cur:
-        if candidates:
-            placeholders = ", ".join(["%s"] * len(candidates))
-            cur.execute(
-                f"""
-                    SELECT table_name
-                    FROM information_schema.tables
-                    WHERE table_schema = %s
-                    AND table_name IN ({placeholders})
-                """,
-                [schema, *candidates],
-            )
-            existing = {str(row.get("table_name") or "") for row in cur.fetchall()}
-            for candidate in candidates:
-                if candidate in existing:
-                    return candidate
+        existing_tables: set[str] = set()
 
-        cur.execute(
-            """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = %s
-                AND table_name LIKE %s
-                ORDER BY table_name ASC
-                LIMIT 1
-            """,
-            (schema, "%third_party_cache%"),
-        )
-        row = cur.fetchone()
-        if row and row.get("table_name"):
-            return str(row["table_name"])
+        # Prefer SHOW TABLES: some DB users have restricted access to information_schema.
+        try:
+            cur.execute("SHOW TABLES")
+            for row in cur.fetchall() or []:
+                if not isinstance(row, dict):
+                    continue
+                for value in row.values():
+                    table_name = str(value or "").strip()
+                    if table_name:
+                        existing_tables.add(table_name)
+        except Exception:
+            existing_tables = set()
+
+        if not existing_tables:
+            try:
+                if candidates:
+                    placeholders = ", ".join(["%s"] * len(candidates))
+                    cur.execute(
+                        f"""
+                            SELECT table_name
+                            FROM information_schema.tables
+                            WHERE table_schema = %s
+                            AND table_name IN ({placeholders})
+                        """,
+                        [schema, *candidates],
+                    )
+                    existing_tables = {str(row.get("table_name") or "") for row in cur.fetchall()}
+            except Exception:
+                existing_tables = set()
+
+        for candidate in candidates:
+            if candidate in existing_tables:
+                return candidate
+
+        if existing_tables:
+            fuzzy_candidates = sorted(table for table in existing_tables if "third_party_cache" in table)
+            if fuzzy_candidates:
+                return fuzzy_candidates[0]
+
+        # Last-resort lookup when metadata queries are restricted.
+        for candidate in candidates:
+            if not candidate.replace("_", "").isalnum():
+                continue
+            try:
+                cur.execute(f"SELECT 1 FROM {candidate} LIMIT 1")
+                return candidate
+            except Exception:
+                continue
 
     return ""
 
