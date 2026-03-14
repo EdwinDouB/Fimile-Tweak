@@ -25,6 +25,55 @@ def _load_mysql_config() -> dict[str, str | int]:
         "database": _read_with_aliases("MYSQL_DATABASE", "MYSQL_DB", "DB_DATABASE", "DB_NAME"),
     }
 
+
+def _resolve_router_messages_table(conn: Any) -> str:
+    """Pick an existing router_messages cache table, with env override support."""
+    config = _load_mysql_config()
+    schema = str(config["database"])
+    preferred = _read_with_aliases("ROUTER_MESSAGES_TABLE", "MYSQL_ROUTER_MESSAGES_TABLE")
+
+    candidates = [
+        preferred,
+        "transit_third_party_cache",
+        "third_party_cache",
+        "transit_router_messages_cache",
+    ]
+    candidates = [name.strip() for name in candidates if str(name).strip()]
+
+    with conn.cursor() as cur:
+        if candidates:
+            placeholders = ", ".join(["%s"] * len(candidates))
+            cur.execute(
+                f"""
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = %s
+                    AND table_name IN ({placeholders})
+                """,
+                [schema, *candidates],
+            )
+            existing = {str(row.get("table_name") or "") for row in cur.fetchall()}
+            for candidate in candidates:
+                if candidate in existing:
+                    return candidate
+
+        cur.execute(
+            """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = %s
+                AND table_name LIKE %s
+                ORDER BY table_name ASC
+                LIMIT 1
+            """,
+            (schema, "%third_party_cache%"),
+        )
+        row = cur.fetchone()
+        if row and row.get("table_name"):
+            return str(row["table_name"])
+
+    return ""
+
 DB_FETCH_BATCH_SIZE = max(100, int(read_config("DB_FETCH_BATCH_SIZE", "5000")))
 
 def _require_db_env() -> None:
@@ -234,7 +283,7 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
-    """Load latest cached router_messages JSON from transit_third_party_cache by tracking_number."""
+    """Load latest cached router_messages JSON by tracking_number."""
     _require_db_env()
 
     try:
@@ -263,6 +312,12 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
 
     payload_map: dict[str, Any] = {}
     try:
+        table_name = _resolve_router_messages_table(conn)
+        if not table_name:
+            return {}
+        if not table_name.replace("_", "").isalnum():
+            return {}
+
         with conn.cursor() as cur:
             chunk_size = 500
             for i in range(0, len(tracking_ids_clean), chunk_size):
@@ -270,7 +325,7 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
                 placeholders = ", ".join(["%s"] * len(chunk))
                 sql = f"""
                     SELECT tracking_number, router_messages, created_at
-                    FROM transit_third_party_cache
+                    FROM {table_name}
                     WHERE tracking_number IN ({placeholders})
                     AND router_messages IS NOT NULL
                     ORDER BY tracking_number ASC, created_at DESC
