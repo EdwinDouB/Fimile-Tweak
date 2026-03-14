@@ -733,7 +733,17 @@ def main() -> None:
             sender_info_map = {}
 
         try:
-            router_messages_map = db.fetch_router_messages_map(tuple(dedup_ids))
+            fetch_router_messages = getattr(db, "fetch_router_messages_map", None)
+            if callable(fetch_router_messages):
+                router_messages_map = fetch_router_messages(tuple(dedup_ids))
+            else:
+                fallback_fetch_router_messages = globals().get("fetch_router_messages_map")
+                if callable(fallback_fetch_router_messages):
+                    router_messages_map = fallback_fetch_router_messages(tuple(dedup_ids))
+                else:
+                    raise AttributeError(
+                        f"module 'utils.db' has no attribute 'fetch_router_messages_map' (loaded from {getattr(db, '__file__', 'unknown')})"
+                    )
         except Exception as e:
             st.warning(f"Failed to load router_messages from DB: {e}")
             router_messages_map = {}
