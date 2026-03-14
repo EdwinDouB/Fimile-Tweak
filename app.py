@@ -679,9 +679,9 @@ def main() -> None:
     with c2:
         end_d = st.date_input(tr("end_date"), value=date.today())
 
-    raw_ids: list[str] = []
-    btn = st.button(tr("load_btn"), type="primary")
-    if btn:
+    raw_ids: list[str] = st.session_state.get("db_raw_ids", [])
+    run_btn = st.button(tr("load_merge_btn"), type="primary")
+    if run_btn:
         with st.spinner(tr("loading_db")):
             try:
                 if st.session_state.get("date_filter_type") == "delivery":
@@ -695,9 +695,6 @@ def main() -> None:
                 st.error(str(e))
                 raw_ids = []
                 st.session_state["db_raw_ids"] = []
-
-    if not btn:
-        raw_ids = st.session_state.get("db_raw_ids", [])
 
     if raw_ids:
         with st.expander(tr("db_preview", count=len(raw_ids)), expanded=False):
@@ -718,7 +715,7 @@ def main() -> None:
 
     st.subheader(tr("fetch_section"))
 
-    if st.button(tr("fetch_btn"), type="primary", disabled=not dedup_ids):
+    if run_btn and dedup_ids:
         st.session_state["fetch_clicked_at"] = datetime.now()
         failures: list[dict[str, str]] = []
         receive_province_map: dict[str, str] = {}
