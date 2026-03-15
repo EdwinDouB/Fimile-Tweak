@@ -567,22 +567,27 @@ def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) ->
 
     all_images: list[dict[str, Any]] = []
 
-    pod_obj = success_evt.get("pod")
-    if isinstance(pod_obj, dict):
-        images = pod_obj.get("images")
-        if isinstance(images, list):
-            all_images.extend([x for x in images if isinstance(x, dict)])
+    def extract_images_from_container(container: dict[str, Any]) -> None:
+        pod_obj = container.get("pod")
+        if isinstance(pod_obj, dict):
+            images = pod_obj.get("images")
+            if isinstance(images, list):
+                all_images.extend([x for x in images if isinstance(x, dict)])
 
-    pods_obj = success_evt.get("pods")
-    if isinstance(pods_obj, dict):
-        pod_list = pods_obj.get("pod")
-        if isinstance(pod_list, list):
-            for pod_entry in pod_list:
-                if not isinstance(pod_entry, dict):
-                    continue
-                images = pod_entry.get("images")
-                if isinstance(images, list):
-                    all_images.extend([x for x in images if isinstance(x, dict)])
+        pods_obj = container.get("pods")
+        if isinstance(pods_obj, dict):
+            pod_list = pods_obj.get("pod")
+            if isinstance(pod_list, list):
+                for pod_entry in pod_list:
+                    if not isinstance(pod_entry, dict):
+                        continue
+                    images = pod_entry.get("images")
+                    if isinstance(images, list):
+                        all_images.extend([x for x in images if isinstance(x, dict)])
+
+    for container in (success_evt, success_evt.get("logItem"), success_evt.get("log")):
+        if isinstance(container, dict):
+            extract_images_from_container(container)
 
     return all_images
 
