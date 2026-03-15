@@ -13,6 +13,115 @@ import pandas as pd
 import streamlit as st
 
 
+def _load_intervals(intervals_raw: Any) -> list[dict[str, Any]]:
+    if isinstance(intervals_raw, list):
+        return [item for item in intervals_raw if isinstance(item, dict)]
+    if isinstance(intervals_raw, str):
+        text = intervals_raw.strip()
+        if not text:
+            return []
+        try:
+            loaded = json.loads(text)
+        except Exception:
+            return []
+        if isinstance(loaded, list):
+            return [item for item in loaded if isinstance(item, dict)]
+    return []
+
+
+def build_route_attempts_view(source_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if source_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    success_types = {"success", "delivered"}
+    fail_types = {"fail", "failed", "failure"}
+    ofd_types = {"out-for-delivery", "ofd", "outfordelivery"}
+
+    route_rows: list[dict[str, Any]] = []
+    unresolved_rows: list[dict[str, Any]] = []
+
+    for _, row in source_df.iterrows():
+        tracking_id = str(row.get("tracking_id") or "").strip()
+        intervals = _load_intervals(row.get("Intervals"))
+        if not intervals:
+            unresolved_rows.append(
+                {
+                    "tracking_id": tracking_id,
+                    "Hub": row.get("Hub", ""),
+                    "created_time": row.get("created_time", ""),
+                    "reason": "Intervals missing or invalid",
+                }
+            )
+            continue
+
+        found_ofd = False
+        for idx, event in enumerate(intervals):
+            event_type_value = str(event.get("type") or "").strip().lower()
+            if event_type_value not in ofd_types:
+                continue
+
+            found_ofd = True
+            if idx + 1 >= len(intervals):
+                unresolved_rows.append(
+                    {
+                        "tracking_id": tracking_id,
+                        "Hub": row.get("Hub", ""),
+                        "created_time": row.get("created_time", ""),
+                        "out_for_delivery_time": fmt_dt(to_local_dt(event.get("time"))),
+                        "reason": "No event after out-for-delivery",
+                    }
+                )
+                continue
+
+            next_event = intervals[idx + 1]
+            next_type_value = str(next_event.get("type") or "").strip().lower()
+            if next_type_value not in (success_types | fail_types):
+                unresolved_rows.append(
+                    {
+                        "tracking_id": tracking_id,
+                        "Hub": row.get("Hub", ""),
+                        "created_time": row.get("created_time", ""),
+                        "out_for_delivery_time": fmt_dt(to_local_dt(event.get("time"))),
+                        "next_event_type": next_event.get("type", ""),
+                        "reason": "Next event after out-for-delivery is neither success nor fail",
+                    }
+                )
+                continue
+
+            route_name = str(event.get("route") or next_event.get("route") or "").strip()
+            route_rows.append(
+                {
+                    "route": route_name or "UNKNOWN_ROUTE",
+                    "result": "success" if next_type_value in success_types else "fail",
+                    "tracking_id": tracking_id,
+                    "Hub": row.get("Hub", ""),
+                    "created_time": row.get("created_time", ""),
+                    "out_for_delivery_time": fmt_dt(to_local_dt(event.get("time"))),
+                    "delivered_time": fmt_dt(to_local_dt(next_event.get("time"))),
+                    "POD是否合格": "是" if bool(next_event.get("POD")) else "否",
+                }
+            )
+
+        if not found_ofd:
+            unresolved_rows.append(
+                {
+                    "tracking_id": tracking_id,
+                    "Hub": row.get("Hub", ""),
+                    "created_time": row.get("created_time", ""),
+                    "reason": "No out-for-delivery event found",
+                }
+            )
+
+    route_df = pd.DataFrame(route_rows)
+    unresolved_df = pd.DataFrame(unresolved_rows)
+
+    if not route_df.empty:
+        route_df = route_df.sort_values(by=["route", "out_for_delivery_time", "tracking_id"], na_position="last")
+    if not unresolved_df.empty:
+        unresolved_df = unresolved_df.sort_values(by=["reason", "tracking_id"], na_position="last")
+    return route_df, unresolved_df
+
+
 def render_percentage_pie(
     title: str,
     hit_count: int,
@@ -670,8 +779,6 @@ def main() -> None:
         st.session_state["language"] = "zh"
     if "hide_unknown_dimensions" not in st.session_state:
         st.session_state["hide_unknown_dimensions"] = False
-    if "date_filter_type" not in st.session_state:
-        st.session_state["date_filter_type"] = "created"
     if "unknown_contractor_overrides" not in st.session_state:
         st.session_state["unknown_contractor_overrides"] = {}
     if "contractor_override_hub" not in st.session_state:
@@ -689,16 +796,6 @@ def main() -> None:
     st.subheader(tr("input_section"))
     st.caption(f"{tr('input_mode')}: {tr('mode_db')}")
 
-    date_filter_options = {
-        tr("date_filter_created"): "created",
-        tr("date_filter_delivery"): "delivery",
-    }
-    selected_date_filter = st.selectbox(
-        tr("date_filter_type"),
-        options=list(date_filter_options.keys()),
-    )
-    st.session_state["date_filter_type"] = date_filter_options[selected_date_filter]
-
     c1, c2 = st.columns(2)
     with c1:
         start_d = st.date_input(tr("start_date"), value=date.today() - timedelta(days=1))
@@ -711,10 +808,7 @@ def main() -> None:
         clear_query_caches()
         with st.spinner(tr("loading_db")):
             try:
-                if st.session_state.get("date_filter_type") == "delivery":
-                    raw_ids = fetch_tracking_numbers_by_delivery_window(start_d, end_d)
-                else:
-                    raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
+                raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
                 st.session_state["db_raw_ids"] = raw_ids
                 if not raw_ids:
                     st.warning(tr("no_tracking_found"))
@@ -942,16 +1036,6 @@ def main() -> None:
             filtered_df = filtered_df[known_mask]
 
 
-        if st.session_state.get("date_filter_type") == "delivery":
-            ofd_col = "first_out_for_delivery_date" if "first_out_for_delivery_date" in filtered_df.columns else "out_for_delivery_time"
-            ofd_dt = to_datetime_series(filtered_df, ofd_col)
-            start_ts = pd.Timestamp(start_d)
-            end_ts = pd.Timestamp(end_d) + pd.Timedelta(days=1)
-            filtered_df = filtered_df[
-                ofd_dt.notna()
-                & (ofd_dt >= start_ts)
-                & (ofd_dt < end_ts)
-            ]
 
         non_pickup_filtered_df, _ = split_pickup_routes(filtered_df)
         filtered_df = non_pickup_filtered_df.copy()
@@ -1008,6 +1092,19 @@ def main() -> None:
                 file_name=f"customer_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
             )
+        route_attempts_df, unresolved_attempts_df = build_route_attempts_view(filtered_df)
+        st.subheader(tr("route_attempts_section"))
+        if route_attempts_df.empty:
+            st.info(tr("route_attempts_empty"))
+        else:
+            st.dataframe(route_attempts_df, use_container_width=True)
+
+        st.subheader(tr("route_attempts_unresolved_section"))
+        if unresolved_attempts_df.empty:
+            st.info(tr("route_attempts_unresolved_empty"))
+        else:
+            st.dataframe(unresolved_attempts_df, use_container_width=True)
+
         invalid_route_df = build_invalid_route_summary(filtered_df)
         st.subheader(tr("invalid_route_section"))
         if invalid_route_df.empty:
