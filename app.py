@@ -412,21 +412,23 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     lost_analysis = build_lost_package_analysis(analysis_df, fetch_reference_time=fetch_reference_time)
     lost_condition = lost_analysis["lost_mask"]
 
-    lost_detail_df = result_df.loc[
-        lost_condition,
-        [
-            "tracking_id",
-            "Region",
-            "State",
-            "shipperName",
-            "created_time",
-            "first_scanned_time",
-            "last_scanned_time",
-            "out_for_delivery_time",
-            "attempted_time",
-            "delivered_time",
-        ],
-    ].copy()
+    lost_detail_columns = [
+        "tracking_id",
+        "Region",
+        "State",
+        "shipperName",
+        "created_time",
+        "first_scanned_time",
+        "last_scanned_time",
+        "out_for_delivery_time",
+        "attempted_time",
+        "delivered_time",
+    ]
+    lost_detail_df = result_df.loc[lost_condition].copy()
+    for column in lost_detail_columns:
+        if column not in lost_detail_df.columns:
+            lost_detail_df[column] = pd.NA
+    lost_detail_df = lost_detail_df[lost_detail_columns]
 
     if kpi_payload.get("has_monthly_lost_data") and monthly_lost_metric:
         metric_cols = st.columns([2, 1])
