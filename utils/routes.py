@@ -706,7 +706,6 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     intervals = build_intervals(events)
     is_delivered = any(str(x.get("type") or "").strip().lower() in {"success", "delivered"} for x in intervals)
 
-    created_evt = first_event_by_predicate(events, lambda e: event_type(e) == "label")
     scanned_predicate = lambda e: (
         (desc := str(e.get("description", "")).strip().lower()).startswith("scan at")
         or desc.startswith("scanned at")
@@ -724,7 +723,16 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     latest_route = latest_route_assignment(events)
     route_assignments = extract_all_route_assignments(events)
     
-    created_time = to_local_dt(event_ts(created_evt) if created_evt else None)
+    created_time_ms = None
+    if intervals:
+        first_interval_time = intervals[0].get("time")
+        try:
+            if first_interval_time is not None:
+                created_time_ms = int(first_interval_time)
+        except (TypeError, ValueError):
+            created_time_ms = None
+
+    created_time = to_local_dt(created_time_ms)
     first_scanned_time = to_local_dt(event_ts(first_scanned_evt) if first_scanned_evt else None)
     out_for_delivery_time = to_local_dt(event_ts(ofd_evt) if ofd_evt else None)
     attempted_time = to_local_dt(event_ts(fail_evt) if fail_evt else None)
