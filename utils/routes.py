@@ -523,19 +523,23 @@ def first_event_by_predicate(events: list[dict[str, Any]], predicate) -> dict[st
 
 def count_pod_stats(row: dict[str, str] | pd.Series) -> tuple[int, int]:
     pod_count = 0
-    scored_count = 0
+    non_zero_scored_count = 0
     for i in range(1, POD_IMAGE_EXPORT_N + 1):
         feedback = str(row.get(f"pod_feedback_{i}") or "").strip()
         score = str(row.get(f"pod_score_{i}") or "").strip()
         if feedback or score:
             pod_count += 1
         if score:
-            scored_count += 1
-    return pod_count, scored_count
+            try:
+                if float(score) != 0:
+                    non_zero_scored_count += 1
+            except (TypeError, ValueError):
+                non_zero_scored_count += 1
+    return pod_count, non_zero_scored_count
 
 def auto_is_pod_compliant(row: dict[str, str] | pd.Series) -> bool:
-    pod_count, scored_count = count_pod_stats(row)
-    return pod_count >= 3 and scored_count >= 2
+    pod_count, non_zero_scored_count = count_pod_stats(row)
+    return pod_count >= 3 and non_zero_scored_count >= 1
 
 def last_event_by_predicate(events: list[dict[str, Any]], predicate) -> dict[str, Any] | None:
     filtered = [e for e in events if predicate(e)]
@@ -587,19 +591,20 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None) -> bool:
     if not event:
         return False
     pod_images = extract_pod_images_from_success_event(event)
-    pod_count = 0
-    scored_count = 0
+    pod_count = len(pod_images)
+    non_zero_scored_count = 0
     for img in pod_images:
         q = img.get("quality")
         if not isinstance(q, dict):
             continue
-        feedback = str(q.get("feedback") or q.get("qualifiedFeedback") or "").strip()
         score = str(q.get("score") or "").strip()
-        if feedback or score:
-            pod_count += 1
         if score:
-            scored_count += 1
-    return pod_count >= 3 and scored_count >= 2
+            try:
+                if float(score) != 0:
+                    non_zero_scored_count += 1
+            except (TypeError, ValueError):
+                non_zero_scored_count += 1
+    return pod_count >= 3 and non_zero_scored_count >= 1
 
 
 def build_intervals(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
