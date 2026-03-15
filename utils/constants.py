@@ -3,6 +3,7 @@ OUTPUT_COLUMNS = [
     "tracking_id",
     "Region",
     "State",
+    "router_messages",
     "sender_company",
     "sender_province",
     "sender_city",
