@@ -4,6 +4,7 @@ from typing import Any
 import os
 import io 
 import re 
+import json
 
 from utils.utils import *
 from utils.constants import * 
@@ -582,6 +583,70 @@ def extract_pod_images_from_success_event(success_evt: dict[str, Any] | None) ->
     return all_images
 
 
+def is_pod_compliant_for_event(event: dict[str, Any] | None) -> bool:
+    if not event:
+        return False
+    pod_images = extract_pod_images_from_success_event(event)
+    pod_count = 0
+    scored_count = 0
+    for img in pod_images:
+        q = img.get("quality")
+        if not isinstance(q, dict):
+            continue
+        feedback = str(q.get("feedback") or q.get("qualifiedFeedback") or "").strip()
+        score = str(q.get("score") or "").strip()
+        if feedback or score:
+            pod_count += 1
+        if score:
+            scored_count += 1
+    return pod_count >= 3 and scored_count >= 2
+
+
+def build_intervals(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    intervals: list[dict[str, Any]] = []
+
+    def interval_ts(event: dict[str, Any]) -> int | None:
+        for container in (event, event.get("logItem"), event.get("log")):
+            if not isinstance(container, dict):
+                continue
+            for key in ("tsMillis", "timestamp", "ts", "timeMillis"):
+                value = container.get(key)
+                try:
+                    if value is not None:
+                        return int(value)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    for event in events:
+        ts = interval_ts(event)
+        evt_type = event_type(event)
+        description = event_description(event)
+        if not evt_type:
+            continue
+
+        if "customer service" in description.lower():
+            interval_type = "Customer Service"
+        else:
+            interval_type = evt_type
+
+        node: dict[str, Any] = {
+            "time": ts,
+            "type": interval_type,
+        }
+
+        if evt_type in {"fail", "failed", "failure", "out-for-delivery", "ofd", "outfordelivery", "success", "delivered"}:
+            route = parse_route(description)
+            if route:
+                node["route"] = route
+
+        if evt_type in {"fail", "failed", "failure", "success", "delivered"}:
+            node["POD"] = is_pod_compliant_for_event(event)
+
+        intervals.append(node)
+    return intervals
+
+
 def event_description(event: dict[str, Any]) -> str:
     for container in (event, event.get("logItem"), event.get("log")):
         if isinstance(container, dict):
@@ -638,8 +703,8 @@ def infer_hub_from_pre_ofd_scan(events: list[dict[str, Any]], ofd_evt: dict[str,
 
 def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     events = normalize_events(payload)
-    shipper_name = extract_shipper_name_from_events(events)
-    customer_service_hit = has_customer_service_record(events)
+    intervals = build_intervals(events)
+    is_delivered = any(str(x.get("type") or "").strip().lower() in {"success", "delivered"} for x in intervals)
 
     created_evt = first_event_by_predicate(events, lambda e: event_type(e) == "label")
     scanned_predicate = lambda e: (
@@ -647,7 +712,6 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         or desc.startswith("scanned at")
     )
     first_scanned_evt = first_event_by_predicate(events, scanned_predicate)
-    last_scanned_evt = last_event_by_predicate(events, scanned_predicate)
 
     ofd_events = events_by_predicate(events, lambda e: event_type(e) in {"out-for-delivery", "ofd", "outfordelivery"})
     fail_events = events_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
@@ -662,7 +726,6 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     
     created_time = to_local_dt(event_ts(created_evt) if created_evt else None)
     first_scanned_time = to_local_dt(event_ts(first_scanned_evt) if first_scanned_evt else None)
-    last_scanned_time = to_local_dt(event_ts(last_scanned_evt) if last_scanned_evt else None)
     out_for_delivery_time = to_local_dt(event_ts(ofd_evt) if ofd_evt else None)
     attempted_time = to_local_dt(event_ts(fail_evt) if fail_evt else None)
     delivered_time = to_local_dt(event_ts(success_evt) if success_evt else None)
@@ -677,66 +740,17 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
         fallback_route=latest_route,
     )
 
-    first_ofd_time = to_local_dt(event_ts(ofd_events[0])) if len(ofd_events) >= 1 else None
-    second_ofd_time = to_local_dt(event_ts(ofd_events[1])) if len(ofd_events) >= 2 else None
-    third_ofd_time = to_local_dt(event_ts(ofd_events[2])) if len(ofd_events) >= 3 else None
-    first_failed_time = to_local_dt(event_ts(fail_events[0])) if len(fail_events) >= 1 else None
-    second_failed_time = to_local_dt(event_ts(fail_events[1])) if len(fail_events) >= 2 else None
-    third_failed_time = to_local_dt(event_ts(fail_events[2])) if len(fail_events) >= 3 else None
-
-    def attempt_compliance(ofd_time, failed_time) -> str:
-        if ofd_time is None:
-            return ""
-        if failed_time is not None:
-            return "No"
-        return "Yes" if delivered_time is not None else ""
-
     structured_identity = extract_route_identity_from_payload(payload)
     route_name_value = str(structured_identity.get("Route_name") or primary_route or "").strip()
-    route_names_value = str(structured_identity.get("Route_names") or " | ".join(route_assignments)).strip()
 
     row: dict[str, str] = {
         "tracking_id": tracking_id,
-        "shipperName": str(
-            shipper_name
-            or payload.get("shipperName")
-            or payload.get("data", {}).get("shipperName")
-            or payload.get("result", {}).get("shipperName")
-            or payload.get("response", {}).get("shipperName")
-            or ""
-        ),
-        "has_customer_service": "true" if customer_service_hit else "false",
-        "entered_costomer_service": "Yes" if customer_service_hit else "No",
         "Driver": str(structured_identity.get("Driver") or "").strip(),
         "Hub": str(structured_identity.get("Hub") or scan_hub or "").strip(),
         "Contractor": str(structured_identity.get("Contractor") or "").strip(),
         "created_time": fmt_dt(created_time),
-        "first_scanned_time": fmt_dt(first_scanned_time),
-        "last_scanned_time": fmt_dt(last_scanned_time),
-        "out_for_delivery_time": fmt_dt(out_for_delivery_time),
-        "attempted_time": fmt_dt(attempted_time),
-        "first_out_for_delivery_date": fmt_dt(first_ofd_time),
-        "first_failed_date": fmt_dt(first_failed_time),
-        "first_pod_complience": attempt_compliance(first_ofd_time, first_failed_time),
-        "second_out_for_delivery_date": fmt_dt(second_ofd_time),
-        "second_failed_date": fmt_dt(second_failed_time),
-        "second_pod_complience": attempt_compliance(second_ofd_time, second_failed_time),
-        "third_out_for_delivery_date": fmt_dt(third_ofd_time),
-        "third_failed_date": fmt_dt(third_failed_time),
-        "third_pod_complience": attempt_compliance(third_ofd_time, third_failed_time),
-        "beans_pod_link": f'=HYPERLINK("https://www.beansroute.ai/3pl-manager/tabs.html#searchTrackingId/{tracking_id}", "Open Beans POD")',
-        "failed_route": failed_route,
-        "delivered_time": fmt_dt(delivered_time),
-        "success_route": success_route,
-        "ofd_route": ofd_route,
-        "Route_name": route_name_value,
-        "Route_names": route_names_value,
-        "Route_type": str(structured_identity.get("Route_type") or "").strip(),
-        "创建到入库时间": diff_hours(first_scanned_time, created_time),
-        "库内停留时间": diff_hours(out_for_delivery_time, first_scanned_time),
-        "尝试配送时间": diff_hours(attempted_time, out_for_delivery_time),
-        "送达时间": diff_hours(delivered_time, out_for_delivery_time),
-        "整体配送时间": diff_hours(delivered_time, created_time),
+        "Intervals": json.dumps(intervals, ensure_ascii=False),
+        "Is_delivered": "true" if is_delivered else "false",
     }
 
     for i in range(1, POD_IMAGE_EXPORT_N + 1):
