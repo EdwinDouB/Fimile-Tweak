@@ -851,11 +851,18 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     structured_identity = extract_route_identity_from_payload(payload)
     route_name_value = str(structured_identity.get("Route_name") or primary_route or "").strip()
 
+    raw_router_messages = ""
+    if isinstance(payload, (dict, list)):
+        raw_router_messages = json.dumps(payload, ensure_ascii=False)
+    elif payload is not None:
+        raw_router_messages = str(payload)
+
     row: dict[str, str] = {
         "tracking_id": tracking_id,
         "Driver": str(structured_identity.get("Driver") or "").strip(),
         "Hub": str(structured_identity.get("Hub") or scan_hub or "").strip(),
         "Contractor": str(structured_identity.get("Contractor") or "").strip(),
+        "router_messages": raw_router_messages,
         "created_time": fmt_dt(created_time),
         "Intervals": json.dumps(intervals, ensure_ascii=False),
         "Is_delivered": "true" if is_delivered else "false",
