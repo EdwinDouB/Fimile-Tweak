@@ -916,7 +916,8 @@ def main() -> None:
 
 
         if st.session_state.get("date_filter_type") == "delivery":
-            ofd_dt = pd.to_datetime(filtered_df["out_for_delivery_time"], errors="coerce")
+            ofd_col = "first_out_for_delivery_date" if "first_out_for_delivery_date" in filtered_df.columns else "out_for_delivery_time"
+            ofd_dt = to_datetime_series(filtered_df, ofd_col)
             start_ts = pd.Timestamp(start_d)
             end_ts = pd.Timestamp(end_d) + pd.Timedelta(days=1)
             filtered_df = filtered_df[
