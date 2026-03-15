@@ -272,20 +272,18 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
 
     non_pickup_df, _ = split_pickup_routes(result_df)
-    delivered_detail_df = non_pickup_df.loc[
-        non_pickup_df["out_for_delivery_time"].notna() & non_pickup_df["out_for_delivery_time"].astype(str).str.strip().ne(""),
-        [
-            "tracking_id",
-            "Region",
-            "State",
-            "shipperName",
-            "Hub",
-            "Contractor",
-            "Route_name",
-            "out_for_delivery_time",
-            "delivered_time",
-        ],
-    ].copy()
+    delivered_detail_columns = [
+        "tracking_id",
+        "Region",
+        "State",
+        "shipperName",
+        "Hub",
+        "Contractor",
+        "Route_name",
+        "out_for_delivery_time",
+        "delivered_time",
+    ]
+    delivered_detail_df = build_non_pickup_detail_df(non_pickup_df, delivered_detail_columns)
     delivered_detail_df["ofd_dt"] = to_datetime_series(delivered_detail_df, "out_for_delivery_time")
     delivered_detail_df["delivered_dt"] = to_datetime_series(delivered_detail_df, "delivered_time")
     delivered_detail_df["ofd_to_delivered_hours"] = (
@@ -1013,4 +1011,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
