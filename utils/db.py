@@ -382,3 +382,15 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
         conn.close()
 
     return payload_map
+
+
+def clear_query_caches() -> None:
+    """Clear all DB query caches so users can fetch the latest updated records immediately."""
+    for fn in (
+        fetch_tracking_numbers_by_date,
+        fetch_tracking_numbers_by_delivery_window,
+        fetch_receive_province_map,
+        fetch_sender_info_map,
+        fetch_router_messages_map,
+    ):
+        fn.clear()

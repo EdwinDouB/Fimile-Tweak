@@ -682,6 +682,7 @@ def main() -> None:
     raw_ids: list[str] = st.session_state.get("db_raw_ids", [])
     run_btn = st.button(tr("load_merge_btn"), type="primary")
     if run_btn:
+        clear_query_caches()
         with st.spinner(tr("loading_db")):
             try:
                 if st.session_state.get("date_filter_type") == "delivery":
