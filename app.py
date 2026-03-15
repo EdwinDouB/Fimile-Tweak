@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
+import json
 
 import utils.db as db
 from utils.utils import *
@@ -573,17 +574,43 @@ def process_tracking_ids(
 
     total = len(dedup_ids)
     completed = 0
+
+    def _serialize_router_messages(payload: Any) -> str:
+        if payload is None:
+            return ""
+        if isinstance(payload, str):
+            return payload
+        try:
+            return json.dumps(payload, ensure_ascii=False)
+        except TypeError:
+            return str(payload)
+
     def worker(tracking_id: str) -> tuple[str, dict[str, str], dict[str, str] | None]:
         try:
             payload = router_messages_map.get(tracking_id)
             if payload is None:
                 return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": "router_messages not found in DB"}
-            if not isinstance(payload, dict):
-                return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": "router_messages is not valid JSON object"}
-            row = build_row(tracking_id, payload)
-            return tracking_id, row, None
+
+            normalized_payload = payload
+            if isinstance(payload, str):
+                text_payload = payload.strip()
+                if text_payload:
+                    try:
+                        normalized_payload = json.loads(text_payload)
+                    except json.JSONDecodeError:
+                        normalized_payload = payload
+
+            if isinstance(normalized_payload, dict):
+                row = build_row(tracking_id, normalized_payload)
+                return tracking_id, row, None
+
+            row = empty_row(tracking_id)
+            row["router_messages"] = _serialize_router_messages(payload)
+            return tracking_id, row, {"tracking_id": tracking_id, "reason": "router_messages is not valid JSON object"}
         except Exception as e:  # noqa: BLE001
-            return tracking_id, empty_row(tracking_id), {"tracking_id": tracking_id, "reason": str(e)}
+            row = empty_row(tracking_id)
+            row["router_messages"] = _serialize_router_messages(router_messages_map.get(tracking_id))
+            return tracking_id, row, {"tracking_id": tracking_id, "reason": str(e)}
 
     max_workers = min(API_MAX_WORKERS, total)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
