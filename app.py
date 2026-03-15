@@ -209,8 +209,8 @@ def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
 
 def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
     chart_df = result_df.copy()
-    chart_df["_created_date"] = pd.to_datetime(chart_df["created_time"], errors="coerce").dt.date
-    chart_df["_delivered_date"] = pd.to_datetime(chart_df["delivered_time"], errors="coerce").dt.date
+    chart_df["_created_date"] = to_datetime_series(chart_df, "created_time").dt.date
+    chart_df["_delivered_date"] = to_datetime_series(chart_df, "delivered_time").dt.date
     chart_df["_evaluation_weight"] = calculate_package_evaluation_weight(chart_df)
 
     created_count_df = (
