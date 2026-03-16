@@ -336,57 +336,22 @@ def apply_manual_dimension_overrides(df: pd.DataFrame) -> pd.DataFrame:
     return updated_df
 
 def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
-    # scan time - created time and check how many hours 
-    delivered_24h = next((m for m in kpi_payload["metrics"] if m.get("metric") == "<24h delivery rate"), None)
-    pod_compliance_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "Manual POD qualified rate"), None)
-    attempt_24h_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "24h attempt rate"), None)
-
+    metric_map = _metric_lookup(kpi_payload)
     st.markdown(f"#### {tr('compact_title')}")
-    c1, c2, c3 = st.columns(3)
-    if delivered_24h:
-        c1.metric("24h Delivery Rate", f"{delivered_24h['rate']:.2%}", f"{delivered_24h['hit']}/{delivered_24h['total']}")
-        render_percentage_pie(
-            title="24h Delivery Share",
-            hit_count=int(delivered_24h["hit"]),
-            total_count=int(delivered_24h["total"]),
-            hit_label="<24h delivered",
-            miss_label=">=24h or undelivered",
-            chart_key="compact_delivered_24h",
-            container=c1,
-        )
-    else:
-        c1.metric("24h Delivery Rate", "0.00%", "0/0")
-        c1.info("24h delivery share: no data available")
 
-    if pod_compliance_metric:
-        c2.metric("Manual POD Qualified Rate", f"{pod_compliance_metric['rate']:.2%}", f"{pod_compliance_metric['hit']}/{pod_compliance_metric['total']}")
-        render_percentage_pie(
-            title="Manual POD Review Share",
-            hit_count=int(pod_compliance_metric["hit"]),
-            total_count=int(pod_compliance_metric["total"]),
-            hit_label="Qualified",
-            miss_label="Not Qualified",
-            chart_key="compact_pod_compliance",
-            container=c2,
-        )
-    else:
-        c2.metric("Manual POD Qualified Rate", "0.00%", "0/0")
-        c2.info("Manual POD review share: no data available")
-
-    if attempt_24h_metric:
-        c3.metric("24h Attempt Rate", f"{attempt_24h_metric['rate']:.2%}", f"{attempt_24h_metric['hit']}/{attempt_24h_metric['total']}")
-        render_percentage_pie(
-            title="24h Attempt Share",
-            hit_count=int(attempt_24h_metric["hit"]),
-            total_count=int(attempt_24h_metric["total"]),
-            hit_label="Attempted or delivered within 24h",
-            miss_label="No attempt/delivery within 24h",
-            chart_key="compact_attempt_24h",
-            container=c3,
-        )
-    else:
-        c3.metric("24h Attempt Rate", "0.00%", "0/0")
-        c3.info("24h attempt share: no data available")
+    metric_specs = [
+        ("<24h delivery rate", "24h妥投率"),
+        ("<48h delivery rate", "48h妥投率"),
+        ("<72h delivery rate", "72h妥投率"),
+        ("24h attempt rate", "24h Attempt率"),
+    ]
+    cols = st.columns(len(metric_specs))
+    for idx, (metric_key, label) in enumerate(metric_specs):
+        metric = metric_map.get(metric_key)
+        if not metric:
+            cols[idx].metric(label, "0.00%", "0/0")
+        else:
+            cols[idx].metric(label, f"{metric['rate']:.2%}", f"{metric['hit']}/{metric['total']}")
 
 
 def _metric_lookup(kpi_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -460,80 +425,49 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         fetch_reference_time=fetch_reference_time,
     )
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
-
     non_pickup_df, _ = split_pickup_routes(result_df)
-    delivered_detail_columns = [
-        "tracking_id",
-        "Region",
-        "State",
-        "shipperName",
-        "Hub",
-        "Contractor",
-        "Route_name",
-        "out_for_delivery_time",
-        "delivered_time",
+    attempt_detail_df = build_attempt_kpi_detail_df(non_pickup_df)
+    metric_map = _metric_lookup(kpi_payload)
+
+    st.markdown("#### OFD派送时效看板（按每次派送计算）")
+    metric_specs = [
+        ("<24h delivery rate", "24h妥投率"),
+        ("<48h delivery rate", "48h妥投率"),
+        ("<72h delivery rate", "72h妥投率"),
+        ("24h attempt rate", "24h Attempt率"),
     ]
-    delivered_detail_df = build_non_pickup_detail_df(non_pickup_df, delivered_detail_columns)
-    delivered_detail_df["ofd_dt"] = to_datetime_series(delivered_detail_df, "out_for_delivery_time")
-    delivered_detail_df["delivered_dt"] = to_datetime_series(delivered_detail_df, "delivered_time")
-    delivered_detail_df["ofd_to_delivered_hours"] = (
-        delivered_detail_df["delivered_dt"] - delivered_detail_df["ofd_dt"]
-    ).dt.total_seconds() / 3600
-    for threshold in [24, 48, 72]:
-        delivered_detail_df[f"within_{threshold}h"] = (
-            delivered_detail_df["delivered_dt"].notna()
-            & (delivered_detail_df["ofd_to_delivered_hours"] >= 0)
-            & (delivered_detail_df["ofd_to_delivered_hours"] < threshold)
-        )
+    metric_cols = st.columns(len(metric_specs))
+    for i, (metric_key, label) in enumerate(metric_specs):
+        metric = metric_map.get(metric_key)
+        if not metric:
+            metric_cols[i].metric(label, "0.00%", "0/0")
+            continue
+        metric_cols[i].metric(label, f"{metric['rate']:.2%}", f"{metric['hit']}/{metric['total']}")
+
+    st.caption("口径：分母=所有OFD派送次数（含route_attempts_lost_section），不是包裹数。")
+
+    attempt_detail_export_df = attempt_detail_df.copy()
+    if not attempt_detail_export_df.empty:
+        attempt_detail_export_df["ofd_dt"] = attempt_detail_export_df["ofd_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        attempt_detail_export_df["terminal_dt"] = attempt_detail_export_df["terminal_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    attempt_header_cols = st.columns([4, 1])
+    attempt_header_cols[1].download_button(
+        "下载OFD派送时效明细",
+        data=attempt_detail_export_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"ofd_attempt_kpi_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+        disabled=attempt_detail_export_df.empty,
+    )
+    st.dataframe(attempt_detail_export_df, use_container_width=True)
 
     if layout_mode == "compact":
-        render_compact_kpi_row(kpi_payload)
         selected_eval_weight = calculate_package_evaluation_weight(result_df).sum()
         st.metric(tr("compact_eval_weight"), f"{selected_eval_weight:.2f}")
-        st.markdown("##### 24h Delivery Rate Details")
-        compact_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24])
-        st.dataframe(style_breakdown_rows(compact_breakdown_df), use_container_width=True)
         return kpi_payload
 
     render_daily_kpi_charts(result_df)
-
-    st.markdown("#### 24/48/72h Delivery Rate (Scan -> Delivered)")
-    detailed_breakdown_df = build_delivery_breakdown_table(delivered_detail_df, thresholds=[24, 48, 72])
-    st.dataframe(style_breakdown_rows(detailed_breakdown_df), use_container_width=True)
-    delivered_detail_df = delivered_detail_df.drop(columns=["ofd_dt", "delivered_dt"])
-
-    delivered_header_cols = st.columns([4, 1])
-    delivered_header_cols[1].download_button(
-        tr("download_delivered"),
-        data=delivered_detail_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"delivered_rate_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv",
-        use_container_width=True,
-        disabled=delivered_detail_df.empty,
-    )
-
-    delivered_cols = st.columns(3)
-    metric_map = _metric_lookup(kpi_payload)
-    for i, threshold in enumerate([24, 48, 72]):
-        metric = metric_map.get(f"<{threshold}h delivery rate")
-        if not metric:
-            delivered_cols[i].metric(f"<{threshold}h delivery rate", "0.00%", "0/0")
-            delivered_cols[i].info("no data available")
-            continue
-        delivered_cols[i].metric(
-            metric["metric"],
-            f"{metric['rate']:.2%}",
-            f"{metric['hit']}/{metric['total']}",
-        )
-        render_percentage_pie(
-            title=f"<{threshold}h delivery share",
-            hit_count=int(metric["hit"]),
-            total_count=int(metric["total"]),
-            hit_label=f"<{threshold}h delivered",
-            miss_label=f">={threshold}h or undelivered",
-            chart_key=f"delivered_{threshold}_{refresh_key}",
-            container=delivered_cols[i],
-        )
 
     st.markdown("#### 12/24/48/72h Scan Rate (Pickup -> Scan)")
     scan_detail_columns = [
@@ -667,7 +601,7 @@ def build_layout_specific_report_payload(kpi_payload: dict[str, Any], layout_mod
     if layout_mode != "compact":
         return kpi_payload
 
-    compact_metric_names = {"<24h delivery rate", "Manual POD qualified rate", "24h attempt rate"}
+    compact_metric_names = {"<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "Manual POD qualified rate", "24h attempt rate"}
     compact_metrics = [m for m in kpi_payload.get("metrics", []) if m.get("metric") in compact_metric_names]
     compact_charts = [c for c in kpi_payload.get("charts", []) if c.get("chart") in compact_metric_names]
 
