@@ -428,7 +428,12 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     )
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
     non_pickup_df, _ = route_utils.split_pickup_routes(result_df)
-    attempt_detail_df = report_utils.build_attempt_kpi_detail_df(non_pickup_df)
+    attempt_detail_builder = getattr(report_utils, "build_attempt_kpi_detail_df", None)
+    if callable(attempt_detail_builder):
+        attempt_detail_df = attempt_detail_builder(non_pickup_df)
+    else:
+        st.warning("当前运行环境缺少 `build_attempt_kpi_detail_df`，已跳过OFD派送时效明细表。")
+        attempt_detail_df = pd.DataFrame()
     metric_map = _metric_lookup(kpi_payload)
 
     st.markdown("#### OFD派送时效看板（按每次派送计算）")
