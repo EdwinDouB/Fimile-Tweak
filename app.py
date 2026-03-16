@@ -156,6 +156,43 @@ def build_route_attempts_view(
     return route_df, unresolved_df, canceled_df, lost_df
 
 
+def build_multi_route_tracking_view(route_attempts_df: pd.DataFrame) -> pd.DataFrame:
+    if route_attempts_df.empty:
+        return pd.DataFrame()
+
+    source_df = route_attempts_df.copy()
+    source_df["route"] = source_df["route"].fillna("").astype(str).str.strip().replace("", "UNKNOWN_ROUTE")
+
+    if "out_for_delivery_time" in source_df.columns:
+        source_df["_ofd_dt"] = pd.to_datetime(source_df["out_for_delivery_time"], errors="coerce")
+        source_df = source_df.sort_values(by=["tracking_id", "_ofd_dt"], na_position="last")
+
+    rows: list[dict[str, Any]] = []
+    for tracking_id, group in source_df.groupby("tracking_id", dropna=False):
+        route_sequence = group["route"].tolist()
+        unique_routes = list(dict.fromkeys(route_sequence))
+        if len(unique_routes) <= 1:
+            continue
+
+        rows.append(
+            {
+                "tracking_id": str(tracking_id or "").strip(),
+                "Hub": group["Hub"].iloc[0] if "Hub" in group.columns else "",
+                "created_time": group["created_time"].iloc[0] if "created_time" in group.columns else "",
+                "attempt_count": len(route_sequence),
+                "unique_route_count": len(unique_routes),
+                "route_sequence": " -> ".join(route_sequence),
+                "unique_routes": ", ".join(unique_routes),
+                "result_sequence": " -> ".join(group["result"].fillna("").astype(str).tolist()) if "result" in group.columns else "",
+            }
+        )
+
+    multi_route_df = pd.DataFrame(rows)
+    if multi_route_df.empty:
+        return multi_route_df
+    return multi_route_df.sort_values(by=["unique_route_count", "attempt_count", "tracking_id"], ascending=[False, False, True], na_position="last")
+
+
 def render_percentage_pie(
     title: str,
     hit_count: int,
@@ -1132,6 +1169,13 @@ def main() -> None:
             st.info(tr("route_attempts_empty"))
         else:
             st.dataframe(route_attempts_df, use_container_width=True)
+
+        multi_route_tracking_df = build_multi_route_tracking_view(route_attempts_df)
+        st.subheader(tr("multi_route_tracking_section"))
+        if multi_route_tracking_df.empty:
+            st.info(tr("multi_route_tracking_empty"))
+        else:
+            st.dataframe(multi_route_tracking_df, use_container_width=True)
 
         st.subheader(tr("route_attempts_unresolved_section"))
         if unresolved_attempts_df.empty:
