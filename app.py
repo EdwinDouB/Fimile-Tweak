@@ -233,6 +233,121 @@ def build_route_attempt_metrics(route_attempts_df: pd.DataFrame) -> dict[str, di
     }
 
 
+def _event_time_to_dt(event: dict[str, Any]) -> datetime | None:
+    ts = route_utils.event_ts(event)
+    if ts is None:
+        return None
+    return to_local_dt(ts)
+
+
+def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFrame) -> dict[str, Any]:
+    base = {
+        "dsp": {
+            "pod_qualified_rate": {"hit": 0, "total": 0, "rate": 0.0},
+            "lost_rate": {"hit": 0, "total": 0, "rate": 0.0},
+        },
+        "hub": {
+            "scan_rates": {},
+            "avg_first_track_to_warehouse_hours": 0.0,
+            "first_track_to_warehouse_sample": 0,
+            "intercept_success_rate": {"hit": 0, "total": 0, "rate": 0.0},
+            "warehouse_lost_rate": {"hit": 0, "total": 0, "rate": 0.0},
+        },
+    }
+
+    if route_attempts_df.empty and source_df.empty:
+        return base
+
+    if not route_attempts_df.empty:
+        attempt_df = route_attempts_df.copy()
+        pod_hit = int(attempt_df.get("POD是否合格", pd.Series(dtype=str)).fillna("").astype(str).str.strip().eq("是").sum())
+        pod_total = len(attempt_df)
+        base["dsp"]["pod_qualified_rate"] = {"hit": pod_hit, "total": pod_total, "rate": rate(pod_hit, pod_total)}
+
+    non_cancel_rows = 0
+    first_to_warehouse_hours: list[float] = []
+    canceled_count = 0
+    intercept_success_count = 0
+    warehouse_base_count = 0
+    warehouse_lost_count = 0
+    dsp_lost_count = 0
+
+    for _, row in source_df.iterrows():
+        intervals = _load_intervals(row.get("Intervals"))
+        if not intervals:
+            continue
+
+        normalized_events = [{"event": evt, "type": route_utils.event_type(evt), "dt": _event_time_to_dt(evt)} for evt in intervals]
+        normalized_events = [item for item in normalized_events if item["dt"] is not None]
+        if not normalized_events:
+            continue
+        normalized_events.sort(key=lambda item: item["dt"])
+
+        first_event_time = normalized_events[0]["dt"]
+        cancel_index = next((idx for idx, item in enumerate(normalized_events) if item["type"] == "cancel"), None)
+        is_canceled = cancel_index is not None
+
+        for idx, item in enumerate(normalized_events):
+            if item["type"] != "out-for-delivery":
+                continue
+            if idx == len(normalized_events) - 1:
+                dsp_lost_count += 1
+
+        if is_canceled:
+            canceled_count += 1
+            has_delivery_before_cancel = any(
+                item["type"] in {"out-for-delivery", "success", "fail"} for item in normalized_events[: cancel_index + 1]
+            )
+            if not has_delivery_before_cancel:
+                intercept_success_count += 1
+        else:
+            non_cancel_rows += 1
+
+            first_warehouse_item = next((item for item in normalized_events if item["type"] == "warehouse"), None)
+            if first_warehouse_item is not None:
+                elapsed_hours = (first_warehouse_item["dt"] - first_event_time).total_seconds() / 3600
+                if elapsed_hours >= 0:
+                    first_to_warehouse_hours.append(elapsed_hours)
+
+        warehouse_or_sorting_indices = [
+            idx for idx, item in enumerate(normalized_events) if item["type"] in {"warehouse", "sorting"}
+        ]
+        if warehouse_or_sorting_indices:
+            warehouse_base_count += 1
+            if warehouse_or_sorting_indices[-1] == len(normalized_events) - 1:
+                warehouse_lost_count += 1
+
+    attempt_total_for_lost = len(route_attempts_df) if not route_attempts_df.empty else 0
+    base["dsp"]["lost_rate"] = {
+        "hit": dsp_lost_count,
+        "total": attempt_total_for_lost,
+        "rate": rate(dsp_lost_count, attempt_total_for_lost),
+    }
+
+    for threshold in [12, 24, 48, 72]:
+        hit = int(sum(hours < threshold for hours in first_to_warehouse_hours))
+        base["hub"]["scan_rates"][f"{threshold}h"] = {
+            "hit": hit,
+            "total": non_cancel_rows,
+            "rate": rate(hit, non_cancel_rows),
+        }
+
+    avg_hours = float(sum(first_to_warehouse_hours) / len(first_to_warehouse_hours)) if first_to_warehouse_hours else 0.0
+    base["hub"]["avg_first_track_to_warehouse_hours"] = avg_hours
+    base["hub"]["first_track_to_warehouse_sample"] = len(first_to_warehouse_hours)
+    base["hub"]["intercept_success_rate"] = {
+        "hit": intercept_success_count,
+        "total": canceled_count,
+        "rate": rate(intercept_success_count, canceled_count),
+    }
+    base["hub"]["warehouse_lost_rate"] = {
+        "hit": warehouse_lost_count,
+        "total": warehouse_base_count,
+        "rate": rate(warehouse_lost_count, warehouse_base_count),
+    }
+    return base
+
+
 def build_tracking_display_df(
     source_df: pd.DataFrame,
     route_attempts_df: pd.DataFrame,
@@ -606,6 +721,33 @@ def render_kpi_charts(
         )
 
     st.caption("口径：基于“按派送尝试整理的Route明细”表计算，分母=该表全部条目。")
+
+    dsp_hub_metrics = build_dsp_hub_metrics(result_df, metric_source_df)
+
+    st.markdown("#### DSP相关指标")
+    dsp_cols = st.columns(2)
+    pod_metric = dsp_hub_metrics["dsp"]["pod_qualified_rate"]
+    dsp_lost_metric = dsp_hub_metrics["dsp"]["lost_rate"]
+    dsp_cols[0].metric("POD合格率", f"{pod_metric['rate']:.2%}", f"{pod_metric['hit']}/{pod_metric['total']}")
+    dsp_cols[1].metric("DSP丢件率（OFD后无后续轨迹）", f"{dsp_lost_metric['rate']:.2%}", f"{dsp_lost_metric['hit']}/{dsp_lost_metric['total']}")
+
+    st.markdown("#### Hub相关指标")
+    hub_scan_specs = ["12h", "24h", "48h", "72h"]
+    hub_scan_cols = st.columns(len(hub_scan_specs))
+    for idx, key in enumerate(hub_scan_specs):
+        metric = dsp_hub_metrics["hub"]["scan_rates"].get(key, {"rate": 0.0, "hit": 0, "total": 0})
+        hub_scan_cols[idx].metric(f"<{key}上网率", f"{metric['rate']:.2%}", f"{metric['hit']}/{metric['total']}")
+
+    hub_cols = st.columns(3)
+    avg_hours = dsp_hub_metrics["hub"]["avg_first_track_to_warehouse_hours"]
+    avg_sample = dsp_hub_metrics["hub"]["first_track_to_warehouse_sample"]
+    intercept_metric = dsp_hub_metrics["hub"]["intercept_success_rate"]
+    warehouse_lost_metric = dsp_hub_metrics["hub"]["warehouse_lost_rate"]
+    hub_cols[0].metric("首轨迹到首个Warehouse扫描平均时长", f"{avg_hours:.2f}h", f"样本 {avg_sample}")
+    hub_cols[1].metric("拦截成功率", f"{intercept_metric['rate']:.2%}", f"{intercept_metric['hit']}/{intercept_metric['total']}")
+    hub_cols[2].metric("仓库丢件率（最后warehouse/sorting后无后续轨迹）", f"{warehouse_lost_metric['rate']:.2%}", f"{warehouse_lost_metric['hit']}/{warehouse_lost_metric['total']}")
+
+    st.caption("Hub口径：上网率与首仓时效分母=非取消件；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
 
     st.markdown(f"#### {tr('timeliness_quality_breakdown_title')}")
     timeliness_quality_df = build_timeliness_quality_breakdown_table(metric_source_df, thresholds=[24, 48, 72])
