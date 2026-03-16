@@ -236,6 +236,12 @@ def build_route_attempt_metrics(route_attempts_df: pd.DataFrame) -> dict[str, di
 def _event_time_to_dt(event: dict[str, Any]) -> datetime | None:
     ts = route_utils.event_ts(event)
     if ts is None:
+        raw_time = event.get("time")
+        try:
+            ts = int(raw_time) if raw_time is not None else None
+        except (TypeError, ValueError):
+            ts = None
+    if ts is None:
         return None
     return to_local_dt(ts)
 
@@ -278,15 +284,34 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
 
     def _is_sorting_type(type_value: str) -> bool:
         normalized = str(type_value or "").strip().lower()
-        return "sorting" in normalized
+        return "sorting" in normalized or normalized == "sort"
+
+    def _interval_ts_ms(event: dict[str, Any]) -> int | None:
+        ts = route_utils.event_ts(event)
+        if ts is None:
+            ts = event.get("time")
+        if ts is None:
+            return None
+        try:
+            return int(ts)
+        except (TypeError, ValueError):
+            return None
 
     for _, row in source_df.iterrows():
         intervals = _load_intervals(row.get("Intervals"))
         if not intervals:
             continue
 
-        normalized_events = [{"event": evt, "type": route_utils.event_type(evt), "dt": _event_time_to_dt(evt)} for evt in intervals]
-        normalized_events = [item for item in normalized_events if item["dt"] is not None]
+        normalized_events = [
+            {
+                "event": evt,
+                "type": route_utils.event_type(evt),
+                "dt": _event_time_to_dt(evt),
+                "time_ms": _interval_ts_ms(evt),
+            }
+            for evt in intervals
+        ]
+        normalized_events = [item for item in normalized_events if item["dt"] is not None and item["time_ms"] is not None]
         if not normalized_events:
             continue
         normalized_events.sort(key=lambda item: item["dt"])
@@ -308,9 +333,11 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
             )
             if not has_delivery_before_cancel:
                 intercept_success_count += 1
+        # 上网时效按 intervals 的“第一个节点 -> 第一个 warehouse 节点”计算。
+        first_interval_item = normalized_events[0]
         first_warehouse_item = next((item for item in normalized_events if _is_warehouse_type(item["type"])), None)
         if first_warehouse_item is not None:
-            elapsed_hours = (first_warehouse_item["dt"] - first_event_time).total_seconds() / 3600
+            elapsed_hours = (first_warehouse_item["time_ms"] - first_interval_item["time_ms"]) / 3_600_000
             if elapsed_hours >= 0:
                 first_to_warehouse_hours.append(elapsed_hours)
 
@@ -756,7 +783,7 @@ def render_kpi_charts(
     hub_cols[1].metric("拦截成功率", f"{intercept_metric['rate']:.2%}", f"{intercept_metric['hit']}/{intercept_metric['total']}")
     hub_cols[2].metric("仓库丢件率（最后warehouse/sorting后无后续轨迹）", f"{warehouse_lost_metric['rate']:.2%}", f"{warehouse_lost_metric['hit']}/{warehouse_lost_metric['total']}")
 
-    st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=首轨迹到最近warehouse在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
+    st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=intervals首节点到首个warehouse节点在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
 
     st.markdown(f"#### {tr('timeliness_quality_breakdown_title')}")
     timeliness_quality_df = build_timeliness_quality_breakdown_table(metric_source_df, thresholds=[24, 48, 72])
