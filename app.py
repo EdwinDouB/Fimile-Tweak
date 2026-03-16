@@ -865,7 +865,7 @@ def main() -> None:
         end_d = st.date_input(tr("end_date"), value=date.today())
 
     raw_ids: list[str] = st.session_state.get("db_raw_ids", [])
-    run_btn = st.button(tr("load_merge_btn"), type="primary")
+    run_btn = st.button(tr("load_merge_btn"), type="primary", key="load_merge_btn")
     if run_btn:
         clear_query_caches()
         with st.spinner(tr("loading_db")):
@@ -978,7 +978,7 @@ def main() -> None:
 
         st.subheader(tr("filter_view"))
         toggle_label = tr("show_unknown_btn") if st.session_state.get("hide_unknown_dimensions", False) else tr("hide_unknown_btn")
-        if st.button(toggle_label):
+        if st.button(toggle_label, key="toggle_unknown_dimensions"):
             st.session_state["hide_unknown_dimensions"] = not st.session_state.get("hide_unknown_dimensions", False)
 
         available_hubs = sorted(
@@ -1002,7 +1002,7 @@ def main() -> None:
             )
         with override_c3:
             st.write("")
-            if st.button(tr("override_apply_btn"), use_container_width=True):
+            if st.button(tr("override_apply_btn"), use_container_width=True, key="override_apply_btn"):
                 selected_hub = str(st.session_state.get("contractor_override_hub", "")).strip()
                 contractor_name = str(st.session_state.get("contractor_override_name", "")).strip()
                 if selected_hub and contractor_name:
@@ -1084,7 +1084,7 @@ def main() -> None:
             )
         with delivery_filter_c3:
             st.write("")
-            if st.button(tr("apply_delivery_filter"), use_container_width=True):
+            if st.button(tr("apply_delivery_filter"), use_container_width=True, key="apply_delivery_filter"):
                 st.session_state["delivery_filter_start_applied"] = st.session_state["delivery_filter_start"]
                 st.session_state["delivery_filter_end_applied"] = st.session_state["delivery_filter_end"]
 
