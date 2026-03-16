@@ -802,6 +802,36 @@ def process_tracking_ids(
     ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
     return pd.DataFrame(ordered_rows, columns=result_columns), failures
 
+def _filter_options_from_df(source_df: pd.DataFrame, column: str) -> list[str]:
+    values = source_df[column].fillna("").astype(str).str.strip()
+    return sorted([item for item in values.unique().tolist() if item])
+
+
+def _apply_dimension_filters(
+    source_df: pd.DataFrame,
+    selected_region: str,
+    selected_state: str,
+    selected_driver: str,
+    selected_hub: str,
+    selected_contractor: str,
+) -> pd.DataFrame:
+    filtered_df = source_df.copy()
+    all_value = tr("all")
+
+    if selected_region != all_value:
+        filtered_df = filtered_df[filtered_df["Region"].fillna("").astype(str).str.strip() == selected_region]
+    if selected_state != all_value:
+        filtered_df = filtered_df[filtered_df["State"].fillna("").astype(str).str.strip() == selected_state]
+    if selected_driver != all_value:
+        filtered_df = filtered_df[filtered_df["Driver"].fillna("").astype(str).str.strip() == selected_driver]
+    if selected_hub != all_value:
+        filtered_df = filtered_df[filtered_df["Hub"].fillna("").astype(str).str.strip() == selected_hub]
+    if selected_contractor != all_value:
+        filtered_df = filtered_df[filtered_df["Contractor"].fillna("").astype(str).str.strip() == selected_contractor]
+
+    return filtered_df
+
+
 def main() -> None:
     st.set_page_config(page_title="Fimile US Shipment Operations Dashboard", layout="wide")
     st.title(tr("app_title"))
@@ -831,10 +861,6 @@ def main() -> None:
         st.session_state["delivery_filter_start"] = date.today() - timedelta(days=7)
     if "delivery_filter_end" not in st.session_state:
         st.session_state["delivery_filter_end"] = date.today()
-    if "delivery_filter_start_applied" not in st.session_state:
-        st.session_state["delivery_filter_start_applied"] = st.session_state["delivery_filter_start"]
-    if "delivery_filter_end_applied" not in st.session_state:
-        st.session_state["delivery_filter_end_applied"] = st.session_state["delivery_filter_end"]
     if "fetch_clicked_at" not in st.session_state:
         st.session_state["fetch_clicked_at"] = None
     if "language" not in st.session_state:
@@ -1028,40 +1054,62 @@ def main() -> None:
 
         result_df = apply_manual_dimension_overrides(result_df)
 
-        region_series = result_df["Region"].fillna("").astype(str).str.strip()
-        region_options = [tr("all")] + sorted([item for item in region_series.unique().tolist() if item])
+        all_value = tr("all")
+        region_options = [all_value] + _filter_options_from_df(result_df, "Region")
         if st.session_state["region_filter"] not in region_options:
-            st.session_state["region_filter"] = tr("all")
+            st.session_state["region_filter"] = all_value
 
-        driver_series = result_df["Driver"].fillna("").astype(str).str.strip()
-        driver_options = [tr("all")] + sorted([item for item in driver_series.unique().tolist() if item])
+        state_candidate_df = _apply_dimension_filters(
+            result_df,
+            selected_region=st.session_state["region_filter"],
+            selected_state=all_value,
+            selected_driver=all_value,
+            selected_hub=all_value,
+            selected_contractor=all_value,
+        )
+        state_options = [all_value] + _filter_options_from_df(state_candidate_df, "State")
+        if st.session_state["state_filter"] not in state_options:
+            st.session_state["state_filter"] = all_value
+
+        driver_candidate_df = _apply_dimension_filters(
+            result_df,
+            selected_region=st.session_state["region_filter"],
+            selected_state=st.session_state["state_filter"],
+            selected_driver=all_value,
+            selected_hub=st.session_state["hub_filter"],
+            selected_contractor=st.session_state["contractor_filter"],
+        )
+        driver_options = [all_value] + _filter_options_from_df(driver_candidate_df, "Driver")
         if st.session_state["driver_filter"] not in driver_options:
-            st.session_state["driver_filter"] = tr("all")
+            st.session_state["driver_filter"] = all_value
 
-        hub_series = result_df["Hub"].fillna("").astype(str).str.strip()
-        hub_options = [tr("all")] + sorted([item for item in hub_series.unique().tolist() if item])
+        hub_candidate_df = _apply_dimension_filters(
+            result_df,
+            selected_region=st.session_state["region_filter"],
+            selected_state=st.session_state["state_filter"],
+            selected_driver=st.session_state["driver_filter"],
+            selected_hub=all_value,
+            selected_contractor=st.session_state["contractor_filter"],
+        )
+        hub_options = [all_value] + _filter_options_from_df(hub_candidate_df, "Hub")
         if st.session_state["hub_filter"] not in hub_options:
-            st.session_state["hub_filter"] = tr("all")
+            st.session_state["hub_filter"] = all_value
 
-        contractor_series = result_df["Contractor"].fillna("").astype(str).str.strip()
-        contractor_options = [tr("all")] + sorted([item for item in contractor_series.unique().tolist() if item])
+        contractor_candidate_df = _apply_dimension_filters(
+            result_df,
+            selected_region=st.session_state["region_filter"],
+            selected_state=st.session_state["state_filter"],
+            selected_driver=st.session_state["driver_filter"],
+            selected_hub=st.session_state["hub_filter"],
+            selected_contractor=all_value,
+        )
+        contractor_options = [all_value] + _filter_options_from_df(contractor_candidate_df, "Contractor")
         if st.session_state["contractor_filter"] not in contractor_options:
-            st.session_state["contractor_filter"] = tr("all")
+            st.session_state["contractor_filter"] = all_value
 
-        filter_c1, filter_c2, filter_c3, filter_c4, filter_c5 = st.columns(5)
+        filter_c1, filter_c2, filter_c3, filter_c4, filter_c5, filter_c6 = st.columns([1, 1, 1, 1, 1, 0.8])
         with filter_c1:
             selected_region = st.selectbox("Region", options=region_options, key="region_filter")
-
-        if selected_region == tr("all"):
-            available_states_df = result_df
-        else:
-            available_states_df = result_df[result_df["Region"].fillna("").astype(str).str.strip() == selected_region]
-
-        state_series = available_states_df["State"].fillna("").astype(str).str.strip()
-        state_options = [tr("all")] + sorted([item for item in state_series.unique().tolist() if item])
-        if st.session_state["state_filter"] not in state_options:
-            st.session_state["state_filter"] = tr("all")
-
         with filter_c2:
             selected_state = st.selectbox("State", options=state_options, key="state_filter")
         with filter_c3:
@@ -1070,48 +1118,39 @@ def main() -> None:
             selected_hub = st.selectbox("Hub", options=hub_options, key="hub_filter")
         with filter_c5:
             selected_contractor = st.selectbox("Contractor", options=contractor_options, key="contractor_filter")
+        with filter_c6:
+            st.write("")
+            if st.button(tr("reset_filters"), use_container_width=True, key="reset_filters_btn"):
+                st.session_state["region_filter"] = all_value
+                st.session_state["state_filter"] = all_value
+                st.session_state["driver_filter"] = all_value
+                st.session_state["hub_filter"] = all_value
+                st.session_state["contractor_filter"] = all_value
+                st.session_state["delivery_filter_start"] = date.today() - timedelta(days=7)
+                st.session_state["delivery_filter_end"] = date.today()
+                st.rerun()
 
-        delivery_filter_c1, delivery_filter_c2, delivery_filter_c3 = st.columns([2, 2, 1])
+        delivery_filter_c1, delivery_filter_c2 = st.columns(2)
         with delivery_filter_c1:
-            st.date_input(
+            delivery_filter_start = st.date_input(
                 tr("delivery_filter_start"),
                 key="delivery_filter_start",
             )
         with delivery_filter_c2:
-            st.date_input(
+            delivery_filter_end = st.date_input(
                 tr("delivery_filter_end"),
                 key="delivery_filter_end",
             )
-        with delivery_filter_c3:
-            st.write("")
-            if st.button(tr("apply_delivery_filter"), use_container_width=True, key="apply_delivery_filter"):
-                st.session_state["delivery_filter_start_applied"] = st.session_state["delivery_filter_start"]
-                st.session_state["delivery_filter_end_applied"] = st.session_state["delivery_filter_end"]
 
-        filtered_df = result_df.copy()
-        if selected_region != tr("all"):
-            filtered_df = filtered_df[
-                filtered_df["Region"].fillna("").astype(str).str.strip() == selected_region
-            ]
-        if selected_state != tr("all"):
-            filtered_df = filtered_df[
-                filtered_df["State"].fillna("").astype(str).str.strip() == selected_state
-            ]
-        if selected_driver != tr("all"):
-            filtered_df = filtered_df[
-                filtered_df["Driver"].fillna("").astype(str).str.strip() == selected_driver
-            ]
-        if selected_hub != tr("all"):
-            filtered_df = filtered_df[
-                filtered_df["Hub"].fillna("").astype(str).str.strip() == selected_hub
-            ]
-        if selected_contractor != tr("all"):
-            filtered_df = filtered_df[
-                filtered_df["Contractor"].fillna("").astype(str).str.strip() == selected_contractor
-            ]
+        filtered_df = _apply_dimension_filters(
+            result_df,
+            selected_region=selected_region,
+            selected_state=selected_state,
+            selected_driver=selected_driver,
+            selected_hub=selected_hub,
+            selected_contractor=selected_contractor,
+        )
 
-        delivery_filter_start = st.session_state.get("delivery_filter_start_applied")
-        delivery_filter_end = st.session_state.get("delivery_filter_end_applied")
         if delivery_filter_start and delivery_filter_end and delivery_filter_start <= delivery_filter_end:
             delivery_filter_start_ts = pd.Timestamp(delivery_filter_start)
             delivery_filter_end_ts = pd.Timestamp(delivery_filter_end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
@@ -1122,6 +1161,8 @@ def main() -> None:
                 & (ofd_date_series <= delivery_filter_end_ts)
             )
             filtered_df = filtered_df[ofd_range_mask]
+        elif delivery_filter_start and delivery_filter_end and delivery_filter_start > delivery_filter_end:
+            st.warning(tr("delivery_filter_invalid"))
 
         if st.session_state.get("hide_unknown_dimensions", False):
             known_mask = (~filtered_df["Hub"].map(is_unknown_dimension_value)) & (~filtered_df["Contractor"].map(is_unknown_dimension_value))
