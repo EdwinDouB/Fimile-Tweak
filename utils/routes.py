@@ -797,7 +797,14 @@ def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None
                     continue
         return None
 
-    for event in events:
+    def find_scanned_at_description(start_idx: int) -> str:
+        for candidate_event in events[start_idx:]:
+            candidate_desc = event_description(candidate_event).strip()
+            if "scanned at" in candidate_desc.lower():
+                return candidate_desc
+        return ""
+
+    for idx, event in enumerate(events):
         ts = interval_ts(event)
         evt_type = event_type(event)
         description = event_description(event)
@@ -814,8 +821,12 @@ def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None
             "type": interval_type,
         }
 
-        if evt_type in {"warehouse", "sort", "sorting"} and description.strip():
+        if evt_type == "warehouse" and description.strip():
             node["description"] = description.strip()
+        elif evt_type in {"sort", "sorting"}:
+            sort_desc = find_scanned_at_description(idx)
+            if sort_desc:
+                node["description"] = sort_desc
 
         if evt_type in {"fail", "failed", "failure", "out-for-delivery", "ofd", "outfordelivery", "success", "delivered"}:
             route = parse_route(description)
