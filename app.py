@@ -1113,11 +1113,13 @@ def main() -> None:
         delivery_filter_start = st.session_state.get("delivery_filter_start_applied")
         delivery_filter_end = st.session_state.get("delivery_filter_end_applied")
         if delivery_filter_start and delivery_filter_end and delivery_filter_start <= delivery_filter_end:
-            ofd_date_series = to_datetime_series(filtered_df, "out_for_delivery_time").dt.date
+            delivery_filter_start_ts = pd.Timestamp(delivery_filter_start)
+            delivery_filter_end_ts = pd.Timestamp(delivery_filter_end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+            ofd_date_series = to_datetime_series(filtered_df, "out_for_delivery_time")
             ofd_range_mask = (
                 ofd_date_series.notna()
-                & (ofd_date_series >= delivery_filter_start)
-                & (ofd_date_series <= delivery_filter_end)
+                & (ofd_date_series >= delivery_filter_start_ts)
+                & (ofd_date_series <= delivery_filter_end_ts)
             )
             filtered_df = filtered_df[ofd_range_mask]
 
