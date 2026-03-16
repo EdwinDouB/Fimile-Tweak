@@ -775,6 +775,27 @@ def extract_pod_images_from_payload(payload: Any) -> list[dict[str, Any]]:
 
 
 def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: Any = None) -> bool:
+    """Temporary POD rule: qualify when extracted POD images count is >= 3."""
+    if not event:
+        return False
+
+    pod_images = extract_pod_images_from_success_event(event)
+    if len(pod_images) < 3 and isinstance(payload, (dict, list)):
+        fallback_images = extract_pod_images_from_payload(payload)
+        seen_urls = {str(img.get("url") or "").strip() for img in pod_images if isinstance(img, dict)}
+        for image in fallback_images:
+            image_url = str(image.get("url") or "").strip()
+            if image_url and image_url in seen_urls:
+                continue
+            pod_images.append(image)
+            if image_url:
+                seen_urls.add(image_url)
+
+    return len(pod_images) >= 3
+
+
+def legacy_is_pod_compliant_for_event(event: dict[str, Any] | None, payload: Any = None) -> bool:
+    """Previous POD rule (kept for reference, not applied): image count + quality/score checks."""
     if not event:
         return False
 
