@@ -2,6 +2,7 @@
 
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 
@@ -9,7 +10,7 @@ from utils.constants import I18N
 
 
 def read_config(key: str, default: str = "") -> str:
-    """Read runtime config from Streamlit secrets first, then environment variables."""
+    """Read runtime config from Streamlit secrets, local secrets file, then env vars."""
     value = None
     if hasattr(st, "secrets"):
         try:
@@ -18,8 +19,37 @@ def read_config(key: str, default: str = "") -> str:
             value = None
 
     if value is None or str(value).strip() == "":
+        value = _read_local_streamlit_secret(key)
+
+    if value is None or str(value).strip() == "":
         value = os.getenv(key, default)
     return str(value)
+
+
+def _read_local_streamlit_secret(key: str) -> str | None:
+    """Best-effort fallback for local runs outside `streamlit run`.
+
+    In non-Streamlit contexts (CLI scripts/tests), `st.secrets` may be unavailable.
+    We mirror Streamlit's local secrets file lookup and read `secrets.toml` directly.
+    """
+    candidates = (
+        Path.cwd() / ".streamlit" / "secrets.toml",
+        Path.cwd() / "secrets.toml",
+    )
+    for path in candidates:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            import tomllib
+            with path.open("rb") as f:
+                payload = tomllib.load(f)
+            if isinstance(payload, dict) and key in payload:
+                raw = payload.get(key)
+                if raw is not None:
+                    return str(raw)
+        except Exception:
+            continue
+    return None
 
 
 def tr(key: str, **kwargs) -> str:

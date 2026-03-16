@@ -917,9 +917,9 @@ def main() -> None:
     if "query_end_date" not in st.session_state:
         st.session_state["query_end_date"] = default_query_end
     if "delivery_filter_start" not in st.session_state:
-        st.session_state["delivery_filter_start"] = today
+        st.session_state["delivery_filter_start"] = st.session_state["query_start_date"]
     if "delivery_filter_end" not in st.session_state:
-        st.session_state["delivery_filter_end"] = tomorrow
+        st.session_state["delivery_filter_end"] = st.session_state["query_end_date"]
     if "applied_region_filter" not in st.session_state:
         st.session_state["applied_region_filter"] = st.session_state["region_filter"]
     if "applied_state_filter" not in st.session_state:
@@ -995,6 +995,10 @@ def main() -> None:
                 st.session_state["db_raw_ids"] = raw_ids
                 if not raw_ids:
                     st.warning(tr("no_tracking_found"))
+                st.session_state["delivery_filter_start"] = start_d
+                st.session_state["delivery_filter_end"] = end_d
+                st.session_state["applied_delivery_filter_start"] = start_d
+                st.session_state["applied_delivery_filter_end"] = end_d
             except Exception as e:
                 st.error(str(e))
                 raw_ids = []
@@ -1221,15 +1225,15 @@ def main() -> None:
                 st.session_state["driver_filter"] = all_value
                 st.session_state["hub_filter"] = all_value
                 st.session_state["contractor_filter"] = all_value
-                st.session_state["delivery_filter_start"] = today
-                st.session_state["delivery_filter_end"] = tomorrow
+                st.session_state["delivery_filter_start"] = st.session_state["query_start_date"]
+                st.session_state["delivery_filter_end"] = st.session_state["query_end_date"]
                 st.session_state["applied_region_filter"] = all_value
                 st.session_state["applied_state_filter"] = all_value
                 st.session_state["applied_driver_filter"] = all_value
                 st.session_state["applied_hub_filter"] = all_value
                 st.session_state["applied_contractor_filter"] = all_value
-                st.session_state["applied_delivery_filter_start"] = today
-                st.session_state["applied_delivery_filter_end"] = tomorrow
+                st.session_state["applied_delivery_filter_start"] = st.session_state["query_start_date"]
+                st.session_state["applied_delivery_filter_end"] = st.session_state["query_end_date"]
                 st.rerun()
 
         delivery_filter_c1, delivery_filter_c2 = st.columns(2)
