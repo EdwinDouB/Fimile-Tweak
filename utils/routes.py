@@ -814,7 +814,7 @@ def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None
             "type": interval_type,
         }
 
-        if evt_type == "warehouse" and description.strip():
+        if evt_type in {"warehouse", "sort", "sorting"} and description.strip():
             node["description"] = description.strip()
 
         if evt_type in {"fail", "failed", "failure", "out-for-delivery", "ofd", "outfordelivery", "success", "delivered"}:
