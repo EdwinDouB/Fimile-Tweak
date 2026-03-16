@@ -976,16 +976,6 @@ def main() -> None:
         st.session_state["result_df"] = None
     if "failures" not in st.session_state:
         st.session_state["failures"] = []
-    if "region_filter" not in st.session_state:
-        st.session_state["region_filter"] = "ALL"
-    if "state_filter" not in st.session_state:
-        st.session_state["state_filter"] = "ALL"
-    if "driver_filter" not in st.session_state:
-        st.session_state["driver_filter"] = "ALL"
-    if "hub_filter" not in st.session_state:
-        st.session_state["hub_filter"] = "ALL"
-    if "contractor_filter" not in st.session_state:
-        st.session_state["contractor_filter"] = "ALL"
     today = date.today()
     default_query_end = today
     default_query_start = today - timedelta(days=1)
@@ -1000,16 +990,6 @@ def main() -> None:
         st.session_state["delivery_filter_start"] = st.session_state["query_start_date"]
     if "delivery_filter_end" not in st.session_state:
         st.session_state["delivery_filter_end"] = st.session_state["query_end_date"]
-    if "applied_region_filter" not in st.session_state:
-        st.session_state["applied_region_filter"] = st.session_state["region_filter"]
-    if "applied_state_filter" not in st.session_state:
-        st.session_state["applied_state_filter"] = st.session_state["state_filter"]
-    if "applied_driver_filter" not in st.session_state:
-        st.session_state["applied_driver_filter"] = st.session_state["driver_filter"]
-    if "applied_hub_filter" not in st.session_state:
-        st.session_state["applied_hub_filter"] = st.session_state["hub_filter"]
-    if "applied_contractor_filter" not in st.session_state:
-        st.session_state["applied_contractor_filter"] = st.session_state["contractor_filter"]
     if "applied_delivery_filter_start" not in st.session_state:
         st.session_state["applied_delivery_filter_start"] = st.session_state["delivery_filter_start"]
     if "applied_delivery_filter_end" not in st.session_state:
@@ -1032,6 +1012,28 @@ def main() -> None:
         format_func=lambda x: tr("language_zh") if x == "zh" else tr("language_en"),
         key="language",
     )
+
+    all_value = tr("all")
+
+    def _is_all_value(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        normalized = value.strip().lower()
+        return normalized in {all_value.strip().lower(), "all", "全部"}
+
+    for filter_key in ["region_filter", "state_filter", "driver_filter", "hub_filter", "contractor_filter"]:
+        if filter_key not in st.session_state or _is_all_value(st.session_state[filter_key]):
+            st.session_state[filter_key] = all_value
+
+    for applied_filter_key, base_filter_key in [
+        ("applied_region_filter", "region_filter"),
+        ("applied_state_filter", "state_filter"),
+        ("applied_driver_filter", "driver_filter"),
+        ("applied_hub_filter", "hub_filter"),
+        ("applied_contractor_filter", "contractor_filter"),
+    ]:
+        if applied_filter_key not in st.session_state or _is_all_value(st.session_state[applied_filter_key]):
+            st.session_state[applied_filter_key] = st.session_state[base_filter_key]
 
     st.subheader(tr("input_section"))
     st.caption(f"{tr('input_mode')}: {tr('mode_db')}")
@@ -1289,24 +1291,31 @@ def main() -> None:
             selected_hub = st.selectbox("Hub", options=hub_options, key="hub_filter")
         with filter_c5:
             selected_contractor = st.selectbox("Contractor", options=contractor_options, key="contractor_filter")
+
+        def _reset_filters() -> None:
+            st.session_state["region_filter"] = all_value
+            st.session_state["state_filter"] = all_value
+            st.session_state["driver_filter"] = all_value
+            st.session_state["hub_filter"] = all_value
+            st.session_state["contractor_filter"] = all_value
+            st.session_state["delivery_filter_start"] = st.session_state["query_start_date"]
+            st.session_state["delivery_filter_end"] = st.session_state["query_end_date"]
+            st.session_state["applied_region_filter"] = all_value
+            st.session_state["applied_state_filter"] = all_value
+            st.session_state["applied_driver_filter"] = all_value
+            st.session_state["applied_hub_filter"] = all_value
+            st.session_state["applied_contractor_filter"] = all_value
+            st.session_state["applied_delivery_filter_start"] = st.session_state["query_start_date"]
+            st.session_state["applied_delivery_filter_end"] = st.session_state["query_end_date"]
+
         with filter_c6:
             st.write("")
-            if st.button(tr("reset_filters"), use_container_width=True, key="reset_filters_btn"):
-                st.session_state["region_filter"] = all_value
-                st.session_state["state_filter"] = all_value
-                st.session_state["driver_filter"] = all_value
-                st.session_state["hub_filter"] = all_value
-                st.session_state["contractor_filter"] = all_value
-                st.session_state["delivery_filter_start"] = st.session_state["query_start_date"]
-                st.session_state["delivery_filter_end"] = st.session_state["query_end_date"]
-                st.session_state["applied_region_filter"] = all_value
-                st.session_state["applied_state_filter"] = all_value
-                st.session_state["applied_driver_filter"] = all_value
-                st.session_state["applied_hub_filter"] = all_value
-                st.session_state["applied_contractor_filter"] = all_value
-                st.session_state["applied_delivery_filter_start"] = st.session_state["query_start_date"]
-                st.session_state["applied_delivery_filter_end"] = st.session_state["query_end_date"]
-                st.rerun()
+            st.button(
+                tr("reset_filters"),
+                use_container_width=True,
+                key="reset_filters_btn",
+                on_click=_reset_filters,
+            )
 
         delivery_filter_c1, delivery_filter_c2 = st.columns(2)
         with delivery_filter_c1:
