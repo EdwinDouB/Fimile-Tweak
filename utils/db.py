@@ -94,6 +94,51 @@ def _resolve_router_messages_table(conn: Any) -> str:
 
     return ""
 
+
+def _load_table_columns(conn: Any, table_name: str) -> set[str]:
+    """Best-effort column discovery for a table."""
+    columns: set[str] = set()
+    if not table_name or not table_name.replace("_", "").isalnum():
+        return columns
+
+    with conn.cursor() as cur:
+        try:
+            cur.execute(f"SHOW COLUMNS FROM {table_name}")
+            for row in cur.fetchall() or []:
+                if not isinstance(row, dict):
+                    continue
+                field_name = str(row.get("Field") or "").strip()
+                if field_name:
+                    columns.add(field_name)
+            if columns:
+                return columns
+        except Exception:
+            columns = set()
+
+        try:
+            cur.execute(f"SELECT * FROM {table_name} LIMIT 1")
+            if hasattr(cur, "description") and cur.description:
+                columns = {str(desc[0]).strip() for desc in cur.description if desc and str(desc[0]).strip()}
+        except Exception:
+            columns = set()
+
+    return columns
+
+
+def _resolve_router_messages_order_column(columns: set[str]) -> str:
+    """Pick the best ordering column from router-message cache table columns."""
+    preferred = (
+        "created_at",
+        "updated_at",
+        "event_time",
+        "sync_time",
+        "id",
+    )
+    for candidate in preferred:
+        if candidate in columns:
+            return candidate
+    return ""
+
 DB_FETCH_BATCH_SIZE = max(100, int(read_config("DB_FETCH_BATCH_SIZE", "5000")))
 
 def _require_db_env() -> None:
@@ -338,17 +383,27 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
         if not table_name.replace("_", "").isalnum():
             return {}
 
+        table_columns = _load_table_columns(conn, table_name)
+        if not table_columns:
+            return {}
+
+        if "tracking_number" not in table_columns or "router_messages" not in table_columns:
+            return {}
+
+        order_column = _resolve_router_messages_order_column(table_columns)
+        order_sql = f"ORDER BY tracking_number ASC, {order_column} DESC" if order_column else "ORDER BY tracking_number ASC"
+
         with conn.cursor() as cur:
             chunk_size = 500
             for i in range(0, len(tracking_ids_clean), chunk_size):
                 chunk = tracking_ids_clean[i : i + chunk_size]
                 placeholders = ", ".join(["%s"] * len(chunk))
                 sql = f"""
-                    SELECT tracking_number, router_messages, created_at
+                    SELECT tracking_number, router_messages
                     FROM {table_name}
                     WHERE tracking_number IN ({placeholders})
                     AND router_messages IS NOT NULL
-                    ORDER BY tracking_number ASC, created_at DESC
+                    {order_sql}
                 """
                 cur.execute(sql, chunk)
 
