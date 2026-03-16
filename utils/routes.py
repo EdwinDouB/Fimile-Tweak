@@ -921,7 +921,7 @@ def infer_hub_from_pre_ofd_scan(events: list[dict[str, Any]], ofd_evt: dict[str,
     return extract_hub_from_scan_description(event_description(target_evt))
 
 
-def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
+def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
     events = normalize_events(payload)
     intervals = build_intervals(events, payload=payload)
     is_delivered = any(str(x.get("type") or "").strip().lower() in {"success", "delivered"} for x in intervals)

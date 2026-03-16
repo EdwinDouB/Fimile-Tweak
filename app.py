@@ -830,13 +830,13 @@ def process_tracking_ids(
                     except json.JSONDecodeError:
                         normalized_payload = payload
 
-            if isinstance(normalized_payload, dict):
+            if isinstance(normalized_payload, (dict, list)):
                 row = build_row(tracking_id, normalized_payload)
                 return tracking_id, row, None
 
             row = empty_row(tracking_id)
             row["router_messages"] = _serialize_router_messages(payload)
-            return tracking_id, row, {"tracking_id": tracking_id, "reason": "router_messages is not valid JSON object"}
+            return tracking_id, row, {"tracking_id": tracking_id, "reason": "router_messages is not valid JSON object/array"}
         except Exception as e:  # noqa: BLE001
             row = empty_row(tracking_id)
             row["router_messages"] = _serialize_router_messages(router_messages_map.get(tracking_id))
