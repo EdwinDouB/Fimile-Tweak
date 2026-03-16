@@ -94,6 +94,36 @@ def _build_delivery_attempts_df(source_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(attempts)
 
 
+def build_attempt_kpi_detail_df(source_df: pd.DataFrame) -> pd.DataFrame:
+    """Build attempt-level KPI detail for OFD based delivery/attempt metrics."""
+    attempt_level_df = _build_delivery_attempts_df(source_df)
+    if attempt_level_df.empty:
+        return attempt_level_df
+
+    attempt_level_df = attempt_level_df.copy()
+    attempt_level_df["ofd_dt"] = _parse_attempt_event_time(attempt_level_df["out_for_delivery_time"])
+    attempt_level_df["terminal_dt"] = _parse_attempt_event_time(attempt_level_df["terminal_time"])
+    attempt_level_df["ofd_to_terminal_hours"] = (
+        attempt_level_df["terminal_dt"] - attempt_level_df["ofd_dt"]
+    ).dt.total_seconds() / 3600
+
+    for threshold in [24, 48, 72]:
+        attempt_level_df[f"delivered_within_{threshold}h"] = (
+            attempt_level_df["attempt_result"].eq("success")
+            & attempt_level_df["terminal_dt"].notna()
+            & (attempt_level_df["ofd_to_terminal_hours"] >= 0)
+            & (attempt_level_df["ofd_to_terminal_hours"] < threshold)
+        )
+
+    attempt_level_df["attempt_within_24h"] = (
+        attempt_level_df["attempt_result"].isin(["success", "fail"])
+        & attempt_level_df["terminal_dt"].notna()
+        & (attempt_level_df["ofd_to_terminal_hours"] >= 0)
+        & (attempt_level_df["ofd_to_terminal_hours"] < 24)
+    )
+    return attempt_level_df
+
+
 def _parse_attempt_event_time(series: pd.Series) -> pd.Series:
     """Parse event timestamps supporting unix-ms/unix-s/ISO text."""
     if series.empty:
@@ -353,13 +383,7 @@ def build_kpi_report_payload(
     metrics: list[dict[str, Any]] = []
     chart_rows: list[dict[str, Any]] = []
 
-    attempt_level_df = _build_delivery_attempts_df(non_pickup_df)
-    if not attempt_level_df.empty:
-        attempt_level_df["ofd_dt"] = _parse_attempt_event_time(attempt_level_df["out_for_delivery_time"])
-        attempt_level_df["terminal_dt"] = _parse_attempt_event_time(attempt_level_df["terminal_time"])
-        attempt_level_df["ofd_to_terminal_hours"] = (
-            attempt_level_df["terminal_dt"] - attempt_level_df["ofd_dt"]
-        ).dt.total_seconds() / 3600
+    attempt_level_df = build_attempt_kpi_detail_df(non_pickup_df)
 
     ofd_base = attempt_level_df[attempt_level_df["ofd_dt"].notna()].copy() if not attempt_level_df.empty else pd.DataFrame()
 
