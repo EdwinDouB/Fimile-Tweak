@@ -55,52 +55,62 @@ def build_route_attempts_view(source_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
             continue
 
         found_ofd = False
-        for idx, event in enumerate(intervals):
+        idx = 0
+        while idx < len(intervals):
+            event = intervals[idx]
             event_type_value = str(event.get("type") or "").strip().lower()
             if event_type_value not in ofd_types:
+                idx += 1
                 continue
 
             found_ofd = True
-            if idx + 1 >= len(intervals):
+
+            current_ofd_event = event
+            search_idx = idx + 1
+            matched_terminal = None
+
+            while search_idx < len(intervals):
+                candidate_event = intervals[search_idx]
+                candidate_type = str(candidate_event.get("type") or "").strip().lower()
+
+                if candidate_type in ofd_types:
+                    current_ofd_event = candidate_event
+                    search_idx += 1
+                    continue
+
+                if candidate_type in (success_types | fail_types):
+                    matched_terminal = candidate_event
+                    break
+
+                search_idx += 1
+
+            if matched_terminal is None:
                 unresolved_rows.append(
                     {
                         "tracking_id": tracking_id,
                         "Hub": row.get("Hub", ""),
                         "created_time": row.get("created_time", ""),
-                        "out_for_delivery_time": fmt_dt(to_local_dt(event.get("time"))),
-                        "reason": "No event after out-for-delivery",
+                        "out_for_delivery_time": fmt_dt(to_local_dt(current_ofd_event.get("time"))),
+                        "reason": "No success/fail event found after out-for-delivery",
                     }
                 )
-                continue
+                break
 
-            next_event = intervals[idx + 1]
-            next_type_value = str(next_event.get("type") or "").strip().lower()
-            if next_type_value not in (success_types | fail_types):
-                unresolved_rows.append(
-                    {
-                        "tracking_id": tracking_id,
-                        "Hub": row.get("Hub", ""),
-                        "created_time": row.get("created_time", ""),
-                        "out_for_delivery_time": fmt_dt(to_local_dt(event.get("time"))),
-                        "next_event_type": next_event.get("type", ""),
-                        "reason": "Next event after out-for-delivery is neither success nor fail",
-                    }
-                )
-                continue
-
-            route_name = str(event.get("route") or next_event.get("route") or "").strip()
+            matched_type = str(matched_terminal.get("type") or "").strip().lower()
+            route_name = str(current_ofd_event.get("route") or matched_terminal.get("route") or "").strip()
             route_rows.append(
                 {
                     "route": route_name or "UNKNOWN_ROUTE",
-                    "result": "success" if next_type_value in success_types else "fail",
+                    "result": "success" if matched_type in success_types else "fail",
                     "tracking_id": tracking_id,
                     "Hub": row.get("Hub", ""),
                     "created_time": row.get("created_time", ""),
-                    "out_for_delivery_time": fmt_dt(to_local_dt(event.get("time"))),
-                    "delivered_time": fmt_dt(to_local_dt(next_event.get("time"))),
-                    "POD是否合格": "是" if bool(next_event.get("POD")) else "否",
+                    "out_for_delivery_time": fmt_dt(to_local_dt(current_ofd_event.get("time"))),
+                    "finish_time": fmt_dt(to_local_dt(matched_terminal.get("time"))),
+                    "POD是否合格": "是" if bool(matched_terminal.get("POD")) else "否",
                 }
             )
+            idx = search_idx + 1
 
         if not found_ofd:
             unresolved_rows.append(
