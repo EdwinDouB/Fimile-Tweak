@@ -382,6 +382,119 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
     return base
 
 
+def build_hub_scan_detail_table(source_df: pd.DataFrame, thresholds: list[int] | None = None) -> pd.DataFrame:
+    thresholds = thresholds or [12, 24, 48, 72]
+    if source_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "tracking_id",
+                "Region",
+                "State",
+                "Hub",
+                "created_time",
+                "是否计入分母",
+                "是否有有效intervals",
+                "首节点时间",
+                "首个Warehouse时间",
+                "首节点到Warehouse时长(h)",
+            ]
+            + [f"<{threshold}h是否命中分子" for threshold in thresholds]
+        )
+
+    detail_df = source_df.copy()
+    detail_df["tracking_id"] = detail_df.get("tracking_id", "").fillna("").astype(str).str.strip()
+    detail_df["Region"] = detail_df.get("Region", "")
+    detail_df["State"] = detail_df.get("State", "")
+    detail_df["Hub"] = detail_df.get("Hub", "")
+    detail_df["created_time"] = detail_df.get("created_time", "")
+
+    first_event_time_values: list[str] = []
+    first_warehouse_time_values: list[str] = []
+    elapsed_hours_values: list[float | None] = []
+    has_valid_intervals_values: list[bool] = []
+
+    def _is_warehouse_type(type_value: str) -> bool:
+        normalized = str(type_value or "").strip().lower()
+        return "warehouse" in normalized
+
+    def _interval_ts_ms(event: dict[str, Any]) -> int | None:
+        ts = route_utils.event_ts(event)
+        if ts is None:
+            ts = event.get("time")
+        if ts is None:
+            return None
+        try:
+            return int(ts)
+        except (TypeError, ValueError):
+            return None
+
+    for _, row in detail_df.iterrows():
+        intervals = _load_intervals(row.get("Intervals"))
+        if not intervals:
+            has_valid_intervals_values.append(False)
+            first_event_time_values.append("")
+            first_warehouse_time_values.append("")
+            elapsed_hours_values.append(None)
+            continue
+
+        normalized_events = [
+            {
+                "type": route_utils.event_type(evt),
+                "time_ms": _interval_ts_ms(evt),
+                "dt": _event_time_to_dt(evt),
+            }
+            for evt in intervals
+        ]
+        normalized_events = [item for item in normalized_events if item["dt"] is not None and item["time_ms"] is not None]
+        if not normalized_events:
+            has_valid_intervals_values.append(False)
+            first_event_time_values.append("")
+            first_warehouse_time_values.append("")
+            elapsed_hours_values.append(None)
+            continue
+
+        normalized_events.sort(key=lambda item: item["dt"])
+        has_valid_intervals_values.append(True)
+        first_item = normalized_events[0]
+        first_warehouse_item = next((item for item in normalized_events if _is_warehouse_type(item["type"])), None)
+
+        first_event_time_values.append(fmt_dt(first_item["dt"]))
+        if first_warehouse_item is None:
+            first_warehouse_time_values.append("")
+            elapsed_hours_values.append(None)
+            continue
+
+        first_warehouse_time_values.append(fmt_dt(first_warehouse_item["dt"]))
+        elapsed_hours = (first_warehouse_item["time_ms"] - first_item["time_ms"]) / 3_600_000
+        elapsed_hours_values.append(elapsed_hours if elapsed_hours >= 0 else None)
+
+    detail_df["是否计入分母"] = "是"
+    detail_df["是否有有效intervals"] = ["是" if x else "否" for x in has_valid_intervals_values]
+    detail_df["首节点时间"] = first_event_time_values
+    detail_df["首个Warehouse时间"] = first_warehouse_time_values
+    detail_df["首节点到Warehouse时长(h)"] = elapsed_hours_values
+
+    for threshold in thresholds:
+        detail_df[f"<{threshold}h是否命中分子"] = detail_df["首节点到Warehouse时长(h)"].apply(
+            lambda value: "是" if pd.notna(value) and value < threshold else "否"
+        )
+
+    display_columns = [
+        "tracking_id",
+        "Region",
+        "State",
+        "Hub",
+        "created_time",
+        "是否计入分母",
+        "是否有有效intervals",
+        "首节点时间",
+        "首个Warehouse时间",
+        "首节点到Warehouse时长(h)",
+    ] + [f"<{threshold}h是否命中分子" for threshold in thresholds]
+
+    return detail_df.loc[:, display_columns]
+
+
 def build_tracking_display_df(
     source_df: pd.DataFrame,
     route_attempts_df: pd.DataFrame,
@@ -784,6 +897,19 @@ def render_kpi_charts(
     hub_cols[2].metric("仓库丢件率（最后warehouse/sorting后无后续轨迹）", f"{warehouse_lost_metric['rate']:.2%}", f"{warehouse_lost_metric['hit']}/{warehouse_lost_metric['total']}")
 
     st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=intervals首节点到首个warehouse节点在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
+
+    st.markdown("#### Hub上网率明细（分母/分子）")
+    hub_scan_detail_df = build_hub_scan_detail_table(result_df, thresholds=[12, 24, 48, 72])
+    hub_scan_header_cols = st.columns([4, 1])
+    hub_scan_header_cols[1].download_button(
+        "下载Hub上网率明细",
+        data=hub_scan_detail_df.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"hub_scan_rate_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        mime="text/csv",
+        use_container_width=True,
+        disabled=hub_scan_detail_df.empty,
+    )
+    st.dataframe(hub_scan_detail_df, use_container_width=True, hide_index=True)
 
     st.markdown(f"#### {tr('timeliness_quality_breakdown_title')}")
     timeliness_quality_df = build_timeliness_quality_breakdown_table(metric_source_df, thresholds=[24, 48, 72])
