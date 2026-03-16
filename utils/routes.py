@@ -646,35 +646,55 @@ def _extract_pod_images_from_container(container: dict[str, Any] | None) -> list
 
     all_images: list[dict[str, Any]] = []
 
+    def _collect_images(pod_entry: Any) -> list[dict[str, Any]]:
+        if not isinstance(pod_entry, dict):
+            return []
+        collected: list[dict[str, Any]] = []
+        for key in ("images", "image", "photos", "podImages"):
+            value = pod_entry.get(key)
+            if isinstance(value, list):
+                collected.extend([x for x in value if isinstance(x, dict)])
+            elif isinstance(value, dict):
+                collected.append(value)
+        return collected
+
     pod_obj = container.get("pod")
     if isinstance(pod_obj, dict):
-        images = pod_obj.get("images")
-        if isinstance(images, list):
-            all_images.extend([x for x in images if isinstance(x, dict)])
+        all_images.extend(_collect_images(pod_obj))
     elif isinstance(pod_obj, list):
         for pod_entry in pod_obj:
-            if not isinstance(pod_entry, dict):
-                continue
-            images = pod_entry.get("images")
-            if isinstance(images, list):
-                all_images.extend([x for x in images if isinstance(x, dict)])
+            all_images.extend(_collect_images(pod_entry))
 
     pods_obj = container.get("pods")
     if isinstance(pods_obj, dict):
         pod_list = pods_obj.get("pod")
         if isinstance(pod_list, list):
             for pod_entry in pod_list:
-                if not isinstance(pod_entry, dict):
-                    continue
-                images = pod_entry.get("images")
-                if isinstance(images, list):
-                    all_images.extend([x for x in images if isinstance(x, dict)])
+                all_images.extend(_collect_images(pod_entry))
         elif isinstance(pod_list, dict):
-            images = pod_list.get("images")
-            if isinstance(images, list):
-                all_images.extend([x for x in images if isinstance(x, dict)])
+            all_images.extend(_collect_images(pod_list))
 
     return all_images
+
+
+def _pod_image_quality_fields(image: dict[str, Any]) -> tuple[str, str]:
+    quality = image.get("quality") if isinstance(image.get("quality"), dict) else image
+    if not isinstance(quality, dict):
+        return "", ""
+
+    feedback = str(
+        quality.get("feedback")
+        or quality.get("qualifiedFeedback")
+        or quality.get("qualityFeedback")
+        or ""
+    ).strip()
+    score = str(
+        quality.get("score")
+        or quality.get("qualifiedScore")
+        or quality.get("qualityScore")
+        or ""
+    ).strip()
+    return feedback, score
 
 
 def _event_has_pod_marker(event: dict[str, Any] | None, payload: dict[str, Any] | None = None) -> bool:
@@ -760,16 +780,15 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, 
     pod_count = len(pod_images)
     non_zero_scored_count = 0
     for img in pod_images:
-        q = img.get("quality")
-        if not isinstance(q, dict):
-            continue
-        score = str(q.get("score") or "").strip()
+        feedback, score = _pod_image_quality_fields(img)
         if score:
             try:
                 if float(score) != 0:
                     non_zero_scored_count += 1
             except (TypeError, ValueError):
                 non_zero_scored_count += 1
+        elif feedback:
+            non_zero_scored_count += 1
     if pod_count >= 3 and non_zero_scored_count >= 1:
         return True
 
@@ -1031,11 +1050,9 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
 
     pod_images = extract_pod_images_from_success_event(success_evt)
     for i, img in enumerate(pod_images[:POD_IMAGE_EXPORT_N], start=1):
-        q = img.get("quality")
-        if not isinstance(q, dict):
-            continue
-        row[f"pod_feedback_{i}"] = str(q.get("feedback") or q.get("qualifiedFeedback") or "").strip()
-        row[f"pod_score_{i}"] = str(q.get("score") or "").strip()
+        feedback, score = _pod_image_quality_fields(img)
+        row[f"pod_feedback_{i}"] = feedback
+        row[f"pod_score_{i}"] = score
 
     return row
 
