@@ -127,6 +127,7 @@ def build_route_attempts_view(
                     "route": route_name or "UNKNOWN_ROUTE",
                     "result": "success" if matched_type in success_types else "fail",
                     "tracking_id": tracking_id,
+                    "Region": row.get("Region", ""),
                     "Hub": row.get("Hub", ""),
                     "created_time": row.get("created_time", ""),
                     "out_for_delivery_time": fmt_dt(to_local_dt(current_ofd_event.get("time"))),
@@ -230,6 +231,49 @@ def build_route_attempt_metrics(route_attempts_df: pd.DataFrame) -> dict[str, di
         "72h妥投率": _metric_payload(success_mask & (source_df["_elapsed_hours"] < 72)),
         "24h尝试率": _metric_payload(attempt_mask & (source_df["_elapsed_hours"] < 24)),
     }
+
+
+def build_timeliness_quality_breakdown_table(route_attempts_df: pd.DataFrame, thresholds: list[int] | None = None) -> pd.DataFrame:
+    thresholds = thresholds or [24, 48, 72]
+    if route_attempts_df.empty:
+        return pd.DataFrame(columns=["Dimension", "Sample Count"])
+
+    source_df = route_attempts_df.copy()
+    source_df["result"] = source_df["result"].fillna("").astype(str).str.strip().str.lower()
+    source_df["_ofd_dt"] = pd.to_datetime(source_df["out_for_delivery_time"], errors="coerce")
+    source_df["_finish_dt"] = pd.to_datetime(source_df["finish_time"], errors="coerce")
+    source_df["_elapsed_hours"] = (source_df["_finish_dt"] - source_df["_ofd_dt"]).dt.total_seconds() / 3600
+    source_df["_is_success"] = source_df["result"].eq("success")
+    source_df["_valid_duration"] = source_df["_elapsed_hours"].notna() & (source_df["_elapsed_hours"] >= 0)
+    source_df["_region_norm"] = source_df["Region"].apply(normalize_region)
+    source_df["_hub_norm"] = source_df["Hub"].fillna("Unknown Hub").astype(str).str.strip().replace("", "Unknown Hub")
+
+    def _row_payload(scope_name: str, scope_df: pd.DataFrame) -> dict[str, Any]:
+        total_count = len(scope_df)
+        row = {"Dimension": scope_name, "Sample Count": total_count}
+        for threshold in thresholds:
+            hit_count = int((scope_df["_is_success"] & scope_df["_valid_duration"] & (scope_df["_elapsed_hours"] < threshold)).sum())
+            row[f"<{threshold}h Hit"] = hit_count
+            row[f"<{threshold}h Delivery Rate"] = rate(hit_count, total_count)
+        return row
+
+    rows: list[dict[str, Any]] = [_row_payload("Overall", source_df)]
+    for region_code in ["EA", "WE"]:
+        region_df = source_df[source_df["_region_norm"] == region_code]
+        rows.append(_row_payload(region_code, region_df))
+        if region_df.empty:
+            continue
+
+        for hub_name in sorted(region_df["_hub_norm"].unique()):
+            hub_df = region_df[region_df["_hub_norm"] == hub_name]
+            rows.append(_row_payload(hub_name, hub_df))
+
+    table_df = pd.DataFrame(rows)
+    for threshold in thresholds:
+        percent_col = f"<{threshold}h Delivery Rate"
+        if percent_col in table_df.columns:
+            table_df[percent_col] = table_df[percent_col].map(lambda x: f"{x:.2%}")
+    return table_df
 
 
 def render_percentage_pie(
@@ -481,6 +525,10 @@ def render_kpi_charts(
         metric_cols[i].metric(label, f"{metric['rate']:.2%}", f"{metric['hit']}/{metric['total']}")
 
     st.caption("口径：基于“按派送尝试整理的Route明细”表计算，分母=该表全部条目。")
+
+    st.markdown(f"#### {tr('timeliness_quality_breakdown_title')}")
+    timeliness_quality_df = build_timeliness_quality_breakdown_table(metric_source_df, thresholds=[24, 48, 72])
+    st.dataframe(timeliness_quality_df, use_container_width=True, hide_index=True)
 
     attempt_detail_export_df = metric_source_df.copy()
 
@@ -859,17 +907,33 @@ def main() -> None:
         st.session_state["contractor_filter"] = "ALL"
     today = date.today()
     tomorrow = today + timedelta(days=1)
+    default_query_start = date(2026, 3, 4)
+    default_query_end = date(2026, 3, 5)
     date_input_min = today - timedelta(days=365 * 5)
     date_input_max = today + timedelta(days=365 * 2)
 
     if "query_start_date" not in st.session_state:
-        st.session_state["query_start_date"] = today
+        st.session_state["query_start_date"] = default_query_start
     if "query_end_date" not in st.session_state:
-        st.session_state["query_end_date"] = tomorrow
+        st.session_state["query_end_date"] = default_query_end
     if "delivery_filter_start" not in st.session_state:
         st.session_state["delivery_filter_start"] = today
     if "delivery_filter_end" not in st.session_state:
         st.session_state["delivery_filter_end"] = tomorrow
+    if "applied_region_filter" not in st.session_state:
+        st.session_state["applied_region_filter"] = st.session_state["region_filter"]
+    if "applied_state_filter" not in st.session_state:
+        st.session_state["applied_state_filter"] = st.session_state["state_filter"]
+    if "applied_driver_filter" not in st.session_state:
+        st.session_state["applied_driver_filter"] = st.session_state["driver_filter"]
+    if "applied_hub_filter" not in st.session_state:
+        st.session_state["applied_hub_filter"] = st.session_state["hub_filter"]
+    if "applied_contractor_filter" not in st.session_state:
+        st.session_state["applied_contractor_filter"] = st.session_state["contractor_filter"]
+    if "applied_delivery_filter_start" not in st.session_state:
+        st.session_state["applied_delivery_filter_start"] = st.session_state["delivery_filter_start"]
+    if "applied_delivery_filter_end" not in st.session_state:
+        st.session_state["applied_delivery_filter_end"] = st.session_state["delivery_filter_end"]
     if "fetch_clicked_at" not in st.session_state:
         st.session_state["fetch_clicked_at"] = None
     if "language" not in st.session_state:
@@ -1159,6 +1223,13 @@ def main() -> None:
                 st.session_state["contractor_filter"] = all_value
                 st.session_state["delivery_filter_start"] = today
                 st.session_state["delivery_filter_end"] = tomorrow
+                st.session_state["applied_region_filter"] = all_value
+                st.session_state["applied_state_filter"] = all_value
+                st.session_state["applied_driver_filter"] = all_value
+                st.session_state["applied_hub_filter"] = all_value
+                st.session_state["applied_contractor_filter"] = all_value
+                st.session_state["applied_delivery_filter_start"] = today
+                st.session_state["applied_delivery_filter_end"] = tomorrow
                 st.rerun()
 
         delivery_filter_c1, delivery_filter_c2 = st.columns(2)
@@ -1177,18 +1248,32 @@ def main() -> None:
                 max_value=date_input_max,
             )
 
+        apply_filter_clicked = st.button(tr("apply_filters"), type="primary", key="apply_filters_btn")
+        if apply_filter_clicked:
+            st.session_state["applied_region_filter"] = selected_region
+            st.session_state["applied_state_filter"] = selected_state
+            st.session_state["applied_driver_filter"] = selected_driver
+            st.session_state["applied_hub_filter"] = selected_hub
+            st.session_state["applied_contractor_filter"] = selected_contractor
+            st.session_state["applied_delivery_filter_start"] = delivery_filter_start
+            st.session_state["applied_delivery_filter_end"] = delivery_filter_end
+            st.rerun()
+
         filtered_df = _apply_dimension_filters(
             result_df,
-            selected_region=selected_region,
-            selected_state=selected_state,
-            selected_driver=selected_driver,
-            selected_hub=selected_hub,
-            selected_contractor=selected_contractor,
+            selected_region=st.session_state.get("applied_region_filter", all_value),
+            selected_state=st.session_state.get("applied_state_filter", all_value),
+            selected_driver=st.session_state.get("applied_driver_filter", all_value),
+            selected_hub=st.session_state.get("applied_hub_filter", all_value),
+            selected_contractor=st.session_state.get("applied_contractor_filter", all_value),
         )
 
-        if delivery_filter_start and delivery_filter_end and delivery_filter_start <= delivery_filter_end:
-            delivery_filter_start_ts = pd.Timestamp(delivery_filter_start)
-            delivery_filter_end_ts = pd.Timestamp(delivery_filter_end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
+        applied_delivery_filter_start = st.session_state.get("applied_delivery_filter_start")
+        applied_delivery_filter_end = st.session_state.get("applied_delivery_filter_end")
+
+        if applied_delivery_filter_start and applied_delivery_filter_end and applied_delivery_filter_start <= applied_delivery_filter_end:
+            delivery_filter_start_ts = pd.Timestamp(applied_delivery_filter_start)
+            delivery_filter_end_ts = pd.Timestamp(applied_delivery_filter_end) + pd.Timedelta(days=1) - pd.Timedelta(microseconds=1)
             ofd_date_series = to_datetime_series(filtered_df, "out_for_delivery_time")
             ofd_range_mask = (
                 ofd_date_series.notna()
@@ -1196,7 +1281,7 @@ def main() -> None:
                 & (ofd_date_series <= delivery_filter_end_ts)
             )
             filtered_df = filtered_df[ofd_range_mask]
-        elif delivery_filter_start and delivery_filter_end and delivery_filter_start > delivery_filter_end:
+        elif applied_delivery_filter_start and applied_delivery_filter_end and applied_delivery_filter_start > applied_delivery_filter_end:
             st.warning(tr("delivery_filter_invalid"))
 
         if st.session_state.get("hide_unknown_dimensions", False):
