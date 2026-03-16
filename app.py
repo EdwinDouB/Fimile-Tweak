@@ -873,6 +873,8 @@ def main() -> None:
         st.session_state["contractor_override_hub"] = ""
     if "contractor_override_name" not in st.session_state:
         st.session_state["contractor_override_name"] = ""
+    if "auto_test_preset_ran" not in st.session_state:
+        st.session_state["auto_test_preset_ran"] = False
         
     st.selectbox(
         tr("language_label"),
@@ -884,14 +886,29 @@ def main() -> None:
     st.subheader(tr("input_section"))
     st.caption(f"{tr('input_mode')}: {tr('mode_db')}")
 
+    test_preset_start = date(2026, 3, 4)
+    test_preset_end = date(2026, 3, 5)
+    st.caption(
+        tr(
+            "test_preset_notice",
+            start=test_preset_start.strftime("%Y/%m/%d"),
+            end=test_preset_end.strftime("%Y/%m/%d"),
+        )
+    )
+
     c1, c2 = st.columns(2)
     with c1:
-        start_d = st.date_input(tr("start_date"), value=date.today() - timedelta(days=1))
+        start_d = st.date_input(tr("start_date"), value=test_preset_start, disabled=True)
     with c2:
-        end_d = st.date_input(tr("end_date"), value=date.today())
+        end_d = st.date_input(tr("end_date"), value=test_preset_end, disabled=True)
 
     raw_ids: list[str] = st.session_state.get("db_raw_ids", [])
-    run_btn = st.button(tr("load_merge_btn"), type="primary", key="load_merge_btn")
+    manual_run_btn = st.button(tr("load_merge_btn"), type="primary", key="load_merge_btn")
+    auto_run_btn = not st.session_state["auto_test_preset_ran"]
+    if auto_run_btn:
+        st.session_state["auto_test_preset_ran"] = True
+
+    run_btn = manual_run_btn or auto_run_btn
     if run_btn:
         clear_query_caches()
         with st.spinner(tr("loading_db")):
