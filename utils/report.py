@@ -129,7 +129,18 @@ def _parse_attempt_event_time(series: pd.Series) -> pd.Series:
     if series.empty:
         return pd.to_datetime(series, errors="coerce")
 
-    text_series = series.astype("object")
+    def _normalize_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            # Mongo-like payloads: {"$date": {"$numberLong": "..."}} / {"$date": "..."}
+            if "$date" in value:
+                return _normalize_value(value.get("$date"))
+            if "$numberLong" in value:
+                return value.get("$numberLong")
+            if "time" in value:
+                return _normalize_value(value.get("time"))
+        return value
+
+    text_series = series.map(_normalize_value).astype("object")
     numeric = pd.to_numeric(text_series, errors="coerce")
     parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
 
@@ -385,18 +396,21 @@ def build_kpi_report_payload(
 
     attempt_level_df = build_attempt_kpi_detail_df(non_pickup_df)
 
-    ofd_base = attempt_level_df[attempt_level_df["ofd_dt"].notna()].copy() if not attempt_level_df.empty else pd.DataFrame()
+    # Denominator for these metrics is all OFD attempts (including lost attempts),
+    # not unique waybills and not only rows with parseable timestamps.
+    attempt_base = attempt_level_df.copy() if not attempt_level_df.empty else pd.DataFrame()
 
     for threshold in [24, 48, 72]:
-        within = ofd_base[
-            (ofd_base["attempt_result"] == "success")
-            & ofd_base["terminal_dt"].notna()
-            & (ofd_base["ofd_to_terminal_hours"] >= 0)
-            & (ofd_base["ofd_to_terminal_hours"] < threshold)
-        ] if not ofd_base.empty else pd.DataFrame()
+        within = attempt_base[
+            (attempt_base["attempt_result"] == "success")
+            & attempt_base["terminal_dt"].notna()
+            & attempt_base["ofd_dt"].notna()
+            & (attempt_base["ofd_to_terminal_hours"] >= 0)
+            & (attempt_base["ofd_to_terminal_hours"] < threshold)
+        ] if not attempt_base.empty else pd.DataFrame()
         metric_name = f"<{threshold}h delivery rate"
         hit_count = len(within)
-        total_count = len(ofd_base)
+        total_count = len(attempt_base)
         miss_count = max(total_count - hit_count, 0)
         metrics.append(
             {
@@ -568,15 +582,16 @@ def build_kpi_report_payload(
         ]
     )
 
-    failed_without_delivery_count = int((ofd_base["attempt_result"] == "fail").sum()) if not ofd_base.empty else 0
+    failed_without_delivery_count = int((attempt_base["attempt_result"] == "fail").sum()) if not attempt_base.empty else 0
     attempt_hit_mask = (
-        ofd_base["terminal_dt"].notna()
-        & (ofd_base["ofd_to_terminal_hours"] >= 0)
-        & (ofd_base["ofd_to_terminal_hours"] < 24)
-        & ofd_base["attempt_result"].isin(["success", "fail"])
-    ) if not ofd_base.empty else pd.Series(dtype=bool)
-    attempt_total_count = len(ofd_base)
-    attempt_hit_count = int(attempt_hit_mask.sum()) if not ofd_base.empty else 0
+        attempt_base["terminal_dt"].notna()
+        & attempt_base["ofd_dt"].notna()
+        & (attempt_base["ofd_to_terminal_hours"] >= 0)
+        & (attempt_base["ofd_to_terminal_hours"] < 24)
+        & attempt_base["attempt_result"].isin(["success", "fail"])
+    ) if not attempt_base.empty else pd.Series(dtype=bool)
+    attempt_total_count = len(attempt_base)
+    attempt_hit_count = int(attempt_hit_mask.sum()) if not attempt_base.empty else 0
     attempt_miss_count = max(attempt_total_count - attempt_hit_count, 0)
     metrics.append(
         {
