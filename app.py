@@ -292,6 +292,21 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
         description = str(route_utils.event_description(event_item["event"]) or "").strip().lower()
         return "scanned at" in description
 
+    def _find_first_network_event(
+        events: list[dict[str, Any]],
+        first_item: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        first_time_ms = first_item["time_ms"]
+        candidates = [
+            item
+            for item in events
+            if item["time_ms"] >= first_time_ms
+            and (_is_warehouse_type(item["type"]) or _is_sort_scanned_event(item))
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item["time_ms"] - first_time_ms)
+
     def _interval_ts_ms(event: dict[str, Any]) -> int | None:
         ts = route_utils.event_ts(event)
         if ts is None:
@@ -339,11 +354,11 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
             )
             if not has_delivery_before_cancel:
                 intercept_success_count += 1
-        # 上网时效按 intervals 的“第一个节点 -> 第一个 type=sort 且 description 含 Scanned at 的节点”计算。
+        # 上网时效按 intervals 的“第一个节点 -> 最近的 warehouse 或最近的 sort(Scanned at)”计算，取耗时更短者。
         first_interval_item = normalized_events[0]
-        first_sort_scan_item = next((item for item in normalized_events if _is_sort_scanned_event(item)), None)
-        if first_sort_scan_item is not None:
-            elapsed_hours = (first_sort_scan_item["time_ms"] - first_interval_item["time_ms"]) / 3_600_000
+        first_network_item = _find_first_network_event(normalized_events, first_interval_item)
+        if first_network_item is not None:
+            elapsed_hours = (first_network_item["time_ms"] - first_interval_item["time_ms"]) / 3_600_000
             if elapsed_hours >= 0:
                 first_to_sort_scan_hours.append(elapsed_hours)
 
@@ -401,8 +416,8 @@ def build_hub_scan_detail_table(source_df: pd.DataFrame, thresholds: list[int] |
                 "是否计入分母",
                 "是否有有效intervals",
                 "首节点时间",
-                "首个Sort扫描时间",
-                "首节点到Sort扫描时长(h)",
+                "首个上网节点时间",
+                "首节点到上网节点时长(h)",
             ]
             + [f"<{threshold}h是否命中分子" for threshold in thresholds]
         )
@@ -423,11 +438,30 @@ def build_hub_scan_detail_table(source_df: pd.DataFrame, thresholds: list[int] |
         normalized = str(type_value or "").strip().lower()
         return "sorting" in normalized or normalized == "sort"
 
+    def _is_warehouse_type(type_value: str) -> bool:
+        normalized = str(type_value or "").strip().lower()
+        return "warehouse" in normalized
+
     def _is_sort_scanned_event(event_item: dict[str, Any]) -> bool:
         if not _is_sorting_type(event_item["type"]):
             return False
         description = str(route_utils.event_description(event_item["event"]) or "").strip().lower()
         return "scanned at" in description
+
+    def _find_first_network_event(
+        events: list[dict[str, Any]],
+        first_item: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        first_time_ms = first_item["time_ms"]
+        candidates = [
+            item
+            for item in events
+            if item["time_ms"] >= first_time_ms
+            and (_is_warehouse_type(item["type"]) or _is_sort_scanned_event(item))
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda item: item["time_ms"] - first_time_ms)
 
     def _interval_ts_ms(event: dict[str, Any]) -> int | None:
         ts = route_utils.event_ts(event)
@@ -469,26 +503,26 @@ def build_hub_scan_detail_table(source_df: pd.DataFrame, thresholds: list[int] |
         normalized_events.sort(key=lambda item: item["dt"])
         has_valid_intervals_values.append(True)
         first_item = normalized_events[0]
-        first_sort_scan_item = next((item for item in normalized_events if _is_sort_scanned_event(item)), None)
+        first_network_item = _find_first_network_event(normalized_events, first_item)
 
         first_event_time_values.append(fmt_dt(first_item["dt"]))
-        if first_sort_scan_item is None:
+        if first_network_item is None:
             first_sort_scan_time_values.append("")
             elapsed_hours_values.append(None)
             continue
 
-        first_sort_scan_time_values.append(fmt_dt(first_sort_scan_item["dt"]))
-        elapsed_hours = (first_sort_scan_item["time_ms"] - first_item["time_ms"]) / 3_600_000
+        first_sort_scan_time_values.append(fmt_dt(first_network_item["dt"]))
+        elapsed_hours = (first_network_item["time_ms"] - first_item["time_ms"]) / 3_600_000
         elapsed_hours_values.append(elapsed_hours if elapsed_hours >= 0 else None)
 
     detail_df["是否计入分母"] = "是"
     detail_df["是否有有效intervals"] = ["是" if x else "否" for x in has_valid_intervals_values]
     detail_df["首节点时间"] = first_event_time_values
-    detail_df["首个Sort扫描时间"] = first_sort_scan_time_values
-    detail_df["首节点到Sort扫描时长(h)"] = elapsed_hours_values
+    detail_df["首个上网节点时间"] = first_sort_scan_time_values
+    detail_df["首节点到上网节点时长(h)"] = elapsed_hours_values
 
     for threshold in thresholds:
-        detail_df[f"<{threshold}h是否命中分子"] = detail_df["首节点到Sort扫描时长(h)"].apply(
+        detail_df[f"<{threshold}h是否命中分子"] = detail_df["首节点到上网节点时长(h)"].apply(
             lambda value: "是" if pd.notna(value) and value < threshold else "否"
         )
 
@@ -501,8 +535,8 @@ def build_hub_scan_detail_table(source_df: pd.DataFrame, thresholds: list[int] |
         "是否计入分母",
         "是否有有效intervals",
         "首节点时间",
-        "首个Sort扫描时间",
-        "首节点到Sort扫描时长(h)",
+        "首个上网节点时间",
+        "首节点到上网节点时长(h)",
     ] + [f"<{threshold}h是否命中分子" for threshold in thresholds]
 
     return detail_df.loc[:, display_columns]
@@ -905,11 +939,11 @@ def render_kpi_charts(
     avg_sample = dsp_hub_metrics["hub"]["first_track_to_sort_scan_sample"]
     intercept_metric = dsp_hub_metrics["hub"]["intercept_success_rate"]
     warehouse_lost_metric = dsp_hub_metrics["hub"]["warehouse_lost_rate"]
-    hub_cols[0].metric("首轨迹到首个Sort(Scanned at)扫描平均时长", f"{avg_hours:.2f}h", f"样本 {avg_sample}")
+    hub_cols[0].metric("首轨迹到首个上网节点平均时长（warehouse或Sort Scanned at）", f"{avg_hours:.2f}h", f"样本 {avg_sample}")
     hub_cols[1].metric("拦截成功率", f"{intercept_metric['rate']:.2%}", f"{intercept_metric['hit']}/{intercept_metric['total']}")
     hub_cols[2].metric("仓库丢件率（最后warehouse/sorting后无后续轨迹）", f"{warehouse_lost_metric['rate']:.2%}", f"{warehouse_lost_metric['hit']}/{warehouse_lost_metric['total']}")
 
-    st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=intervals首节点到首个type=sort且description含Scanned at节点在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
+    st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=intervals首节点到最近的warehouse或最近的type=sort且description含Scanned at节点，取耗时更短者并在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
 
     st.markdown("#### Hub上网率明细（分母/分子）")
     hub_scan_detail_df = build_hub_scan_detail_table(result_df, thresholds=[12, 24, 48, 72])
