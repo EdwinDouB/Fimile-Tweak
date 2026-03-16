@@ -2,6 +2,7 @@ from utils.utils import to_datetime_series, rate
 from datetime import datetime, timezone
 from utils.routes import split_pickup_routes, build_lost_package_analysis
 from typing import Any
+import ast
 import json
 import pandas as pd
 import io 
@@ -30,7 +31,10 @@ def _load_intervals(intervals_raw: Any) -> list[dict[str, Any]]:
         try:
             loaded = json.loads(text)
         except Exception:
-            return []
+            try:
+                loaded = ast.literal_eval(text)
+            except Exception:
+                return []
         if isinstance(loaded, list):
             return [item for item in loaded if isinstance(item, dict)]
     return []
