@@ -199,6 +199,39 @@ def build_multi_route_tracking_view(route_attempts_df: pd.DataFrame) -> pd.DataF
     return multi_route_df.sort_values(by=["unique_route_count", "attempt_count", "tracking_id"], ascending=[False, False, True], na_position="last")
 
 
+def build_route_attempt_metrics(route_attempts_df: pd.DataFrame) -> dict[str, dict[str, Any]]:
+    metric_names = ["24h妥投率", "48h妥投率", "72h妥投率", "24h尝试率"]
+    if route_attempts_df.empty:
+        return {name: {"hit": 0, "total": 0, "rate": 0.0} for name in metric_names}
+
+    source_df = route_attempts_df.copy()
+    source_df["result"] = source_df["result"].fillna("").astype(str).str.strip().str.lower()
+    source_df["_ofd_dt"] = pd.to_datetime(source_df["out_for_delivery_time"], errors="coerce")
+    source_df["_finish_dt"] = pd.to_datetime(source_df["finish_time"], errors="coerce")
+    source_df["_elapsed_hours"] = (source_df["_finish_dt"] - source_df["_ofd_dt"]).dt.total_seconds() / 3600
+
+    total_count = len(source_df)
+    non_negative_duration_mask = source_df["_elapsed_hours"].notna() & (source_df["_elapsed_hours"] >= 0)
+
+    def _metric_payload(mask: pd.Series) -> dict[str, Any]:
+        hit_count = int(mask.sum())
+        return {
+            "hit": hit_count,
+            "total": total_count,
+            "rate": rate(hit_count, total_count),
+        }
+
+    success_mask = source_df["result"].eq("success") & non_negative_duration_mask
+    attempt_mask = source_df["result"].isin(["success", "fail"]) & non_negative_duration_mask
+
+    return {
+        "24h妥投率": _metric_payload(success_mask & (source_df["_elapsed_hours"] < 24)),
+        "48h妥投率": _metric_payload(success_mask & (source_df["_elapsed_hours"] < 48)),
+        "72h妥投率": _metric_payload(success_mask & (source_df["_elapsed_hours"] < 72)),
+        "24h尝试率": _metric_payload(attempt_mask & (source_df["_elapsed_hours"] < 24)),
+    }
+
+
 def render_percentage_pie(
     title: str,
     hit_count: int,
@@ -420,7 +453,12 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
     else:
         st.line_chart(evaluation_weight_df.set_index("_created_date")["Evaluation Weight"])
 
-def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
+def render_kpi_charts(
+    result_df: pd.DataFrame,
+    layout_mode: str,
+    fetch_reference_time: datetime | None = None,
+    route_attempts_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     st.subheader(tr("kpi_title"))
     if result_df.empty:
         st.info(tr("kpi_empty"))
@@ -431,42 +469,26 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
         fetch_reference_time=fetch_reference_time,
     )
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
-    non_pickup_df, _ = route_utils.split_pickup_routes(result_df)
-    attempt_detail_builder = getattr(report_utils, "build_attempt_kpi_detail_df", None)
-    if callable(attempt_detail_builder):
-        attempt_detail_df = attempt_detail_builder(non_pickup_df)
-    else:
-        st.warning("当前运行环境缺少 `build_attempt_kpi_detail_df`，已跳过OFD派送时效明细表。")
-        attempt_detail_df = pd.DataFrame()
     metric_map = _metric_lookup(kpi_payload)
+    metric_source_df = route_attempts_df if route_attempts_df is not None else pd.DataFrame()
+    route_attempt_metrics = build_route_attempt_metrics(metric_source_df)
 
     st.markdown("#### OFD派送时效看板（按每次派送计算）")
-    metric_specs = [
-        ("<24h delivery rate", "24h妥投率"),
-        ("<48h delivery rate", "48h妥投率"),
-        ("<72h delivery rate", "72h妥投率"),
-        ("24h attempt rate", "24h Attempt率"),
-    ]
+    metric_specs = ["24h妥投率", "48h妥投率", "72h妥投率", "24h尝试率"]
     metric_cols = st.columns(len(metric_specs))
-    for i, (metric_key, label) in enumerate(metric_specs):
-        metric = metric_map.get(metric_key)
-        if not metric:
-            metric_cols[i].metric(label, "0.00%", "0/0")
-            continue
+    for i, label in enumerate(metric_specs):
+        metric = route_attempt_metrics.get(label, {"rate": 0.0, "hit": 0, "total": 0})
         metric_cols[i].metric(label, f"{metric['rate']:.2%}", f"{metric['hit']}/{metric['total']}")
 
-    st.caption("口径：分母=所有OFD派送次数（含route_attempts_lost_section），不是包裹数。")
+    st.caption("口径：基于“按派送尝试整理的Route明细”表计算，分母=该表全部条目。")
 
-    attempt_detail_export_df = attempt_detail_df.copy()
-    if not attempt_detail_export_df.empty:
-        attempt_detail_export_df["ofd_dt"] = attempt_detail_export_df["ofd_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
-        attempt_detail_export_df["terminal_dt"] = attempt_detail_export_df["terminal_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    attempt_detail_export_df = metric_source_df.copy()
 
     attempt_header_cols = st.columns([4, 1])
     attempt_header_cols[1].download_button(
-        "下载OFD派送时效明细",
+        "下载Route明细",
         data=attempt_detail_export_df.to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"ofd_attempt_kpi_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+        file_name=f"route_attempt_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv",
         use_container_width=True,
         disabled=attempt_detail_export_df.empty,
@@ -1076,7 +1098,14 @@ def main() -> None:
             key="kpi_layout_mode",
         )
 
-        kpi_payload = render_kpi_charts(filtered_df, layout_mode=layout_mode, fetch_reference_time=st.session_state.get("fetch_clicked_at"))
+        route_attempts_df, unresolved_attempts_df, canceled_attempts_df, lost_attempts_df = build_route_attempts_view(filtered_df)
+
+        kpi_payload = render_kpi_charts(
+            filtered_df,
+            layout_mode=layout_mode,
+            fetch_reference_time=st.session_state.get("fetch_clicked_at"),
+            route_attempts_df=route_attempts_df,
+        )
 
         success_count = len(result_df) - len(failures)
         fail_count = len(failures)
@@ -1112,7 +1141,6 @@ def main() -> None:
                 file_name=f"customer_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
             )
-        route_attempts_df, unresolved_attempts_df, canceled_attempts_df, lost_attempts_df = build_route_attempts_view(filtered_df)
         st.subheader(tr("route_attempts_section"))
         if route_attempts_df.empty:
             st.info(tr("route_attempts_empty"))
