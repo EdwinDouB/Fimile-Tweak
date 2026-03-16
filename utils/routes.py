@@ -697,9 +697,8 @@ def _pod_image_quality_fields(image: dict[str, Any]) -> tuple[str, str]:
     return feedback, score
 
 
-def _event_has_pod_marker(event: dict[str, Any] | None, payload: dict[str, Any] | None = None) -> bool:
-    if not isinstance(event, dict):
-        return False
+def _payload_has_pod_marker(payload: Any) -> bool:
+    """Check whether any node in payload carries POD presence flags."""
 
     def _truthy(value: Any) -> bool:
         if isinstance(value, bool):
@@ -710,25 +709,39 @@ def _event_has_pod_marker(event: dict[str, Any] | None, payload: dict[str, Any] 
             return value.strip().lower() in {"true", "1", "yes", "y"}
         return False
 
-    candidate_nodes: list[Any] = [event, event.get("logItem"), event.get("log")]
-    if isinstance(payload, dict):
-        candidate_nodes.append(payload)
-
-    for node in candidate_nodes:
-        if not isinstance(node, dict):
-            continue
-
-        pod_value = node.get("pod")
-        if isinstance(pod_value, dict) and pod_value:
-            return True
-        if isinstance(pod_value, list) and any(isinstance(item, dict) for item in pod_value):
-            return True
-        if _truthy(pod_value):
-            return True
-
-        for flag_key in ("hasPod", "isPod", "podAvailable", "podUploaded"):
-            if _truthy(node.get(flag_key)):
+    def _walk(node: Any) -> bool:
+        if isinstance(node, dict):
+            pod_value = node.get("pod")
+            if isinstance(pod_value, dict) and pod_value:
                 return True
+            if isinstance(pod_value, list) and any(isinstance(item, dict) for item in pod_value):
+                return True
+            if _truthy(pod_value):
+                return True
+
+            for flag_key in ("hasPod", "isPod", "podAvailable", "podUploaded"):
+                if _truthy(node.get(flag_key)):
+                    return True
+
+            return any(_walk(value) for value in node.values())
+
+        if isinstance(node, list):
+            return any(_walk(item) for item in node)
+
+        return False
+
+    return _walk(payload)
+
+
+def _event_has_pod_marker(event: dict[str, Any] | None, payload: Any = None) -> bool:
+    if not isinstance(event, dict):
+        return False
+
+    if _payload_has_pod_marker(event) or _payload_has_pod_marker(event.get("logItem")) or _payload_has_pod_marker(event.get("log")):
+        return True
+
+    if payload is not None and _payload_has_pod_marker(payload):
+        return True
 
     return False
 
@@ -761,7 +774,7 @@ def extract_pod_images_from_payload(payload: Any) -> list[dict[str, Any]]:
     return images
 
 
-def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, Any] | None = None) -> bool:
+def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: Any = None) -> bool:
     if not event:
         return False
 
@@ -771,7 +784,7 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, 
         return True
 
     pod_images = extract_pod_images_from_success_event(event)
-    if len(pod_images) < 3 and isinstance(payload, dict):
+    if len(pod_images) < 3 and isinstance(payload, (dict, list)):
         fallback_images = extract_pod_images_from_payload(payload)
         seen_urls = {str(img.get("url") or "").strip() for img in pod_images if isinstance(img, dict)}
         for image in fallback_images:
