@@ -803,7 +803,6 @@ def render_kpi_charts(
             & (scan_detail_df["created_to_scan_hours"] >= 0)
             & (scan_detail_df["created_to_scan_hours"] < threshold)
         )
-    scan_detail_df = scan_detail_df.drop(columns=["created_dt", "first_scanned_dt"])
 
     scan_header_cols = st.columns([4, 1])
     scan_header_cols[1].download_button(
@@ -827,15 +826,39 @@ def render_kpi_charts(
             f"{metric['rate']:.2%}",
             f"{metric['hit']}/{metric['total']}",
         )
-        render_percentage_pie(
-            title=f"<{threshold}h scan share",
-            hit_count=int(metric["hit"]),
-            total_count=int(metric["total"]),
-            hit_label=f"<{threshold}h scanned",
-            miss_label=f">={threshold}h or unscanned",
-            chart_key=f"scan_{threshold}_{refresh_key}",
-            container=scan_cols[i],
+
+    st.markdown("#### 数据总览")
+    overview_columns = list(result_df.columns)
+    preferred_front_columns = [
+        "tracking_id",
+        "Region",
+        "State",
+        "shipperName",
+        "created_time",
+        "first_scanned_time",
+        "last_scanned_time",
+        "out_for_delivery_time",
+        "attempted_time",
+        "delivered_time",
+    ]
+    ordered_columns = [col for col in preferred_front_columns if col in overview_columns] + [
+        col for col in overview_columns if col not in preferred_front_columns
+    ]
+    overview_df = result_df.reindex(columns=ordered_columns).copy()
+    overview_df["created_dt"] = to_datetime_series(overview_df, "created_time")
+    overview_df["first_scanned_dt"] = to_datetime_series(overview_df, "first_scanned_time")
+    overview_df["created_to_scan_hours"] = (
+        overview_df["first_scanned_dt"] - overview_df["created_dt"]
+    ).dt.total_seconds() / 3600
+    for threshold in [12, 24, 48, 72]:
+        overview_df[f"within_{threshold}h"] = (
+            overview_df["first_scanned_dt"].notna()
+            & (overview_df["created_to_scan_hours"] >= 0)
+            & (overview_df["created_to_scan_hours"] < threshold)
         )
+    st.dataframe(overview_df, use_container_width=True)
+
+    scan_detail_df = scan_detail_df.drop(columns=["created_dt", "first_scanned_dt"])
 
     st.markdown("#### Monthly Lost Rate (no events within 120h after Last Scan; exclude waybills not yet 120h old)")
     monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "overall monthly lost rate"), None)

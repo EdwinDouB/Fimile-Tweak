@@ -72,7 +72,43 @@ def rate(hit: int | float, total: int | float) -> float:
 def to_datetime_series(df: pd.DataFrame, column: str) -> pd.Series:
     if column not in df.columns:
         return pd.to_datetime(pd.Series([pd.NaT] * len(df)), errors="coerce")
-    return pd.to_datetime(df[column], errors="coerce")
+
+    source = df[column]
+
+    def _normalize_value(value):
+        if isinstance(value, dict):
+            if "$date" in value:
+                return _normalize_value(value.get("$date"))
+            if "$numberLong" in value:
+                return value.get("$numberLong")
+            if "time" in value:
+                return _normalize_value(value.get("time"))
+        return value
+
+    normalized = source.map(_normalize_value).astype("object")
+    numeric = pd.to_numeric(normalized, errors="coerce")
+    parsed = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+
+    numeric_mask = numeric.notna()
+    if numeric_mask.any():
+        numeric_values = numeric[numeric_mask]
+        millis_mask = numeric_values.abs() >= 1e11
+        if millis_mask.any():
+            parsed.loc[numeric_values[millis_mask].index] = pd.to_datetime(
+                numeric_values[millis_mask], unit="ms", errors="coerce", utc=True
+            ).dt.tz_convert(None)
+
+        seconds_mask = ~millis_mask
+        if seconds_mask.any():
+            parsed.loc[numeric_values[seconds_mask].index] = pd.to_datetime(
+                numeric_values[seconds_mask], unit="s", errors="coerce", utc=True
+            ).dt.tz_convert(None)
+
+    fallback_mask = parsed.isna()
+    if fallback_mask.any():
+        parsed.loc[fallback_mask] = pd.to_datetime(normalized[fallback_mask], errors="coerce", utc=True).dt.tz_convert(None)
+
+    return parsed
 
 def calculate_package_evaluation_weight(df: pd.DataFrame) -> pd.Series:
     """Return per-package evaluation weight for KPI visualizations.
