@@ -35,6 +35,54 @@ def _load_intervals(intervals_raw: Any) -> list[dict[str, Any]]:
     return []
 
 
+
+
+def _parse_list_cell(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        loaded = json.loads(text)
+        if isinstance(loaded, list):
+            return [str(x).strip() for x in loaded if str(x).strip()]
+    except Exception:
+        pass
+    return [x.strip() for x in text.split(",") if x.strip()]
+
+
+def ensure_compatibility_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    out = df.copy()
+
+    if "Contractor" not in out.columns and "Contractors" in out.columns:
+        out["Contractor"] = out["Contractors"].map(lambda v: (_parse_list_cell(v)[0] if _parse_list_cell(v) else ""))
+    if "Driver" not in out.columns and "Drivers" in out.columns:
+        out["Driver"] = out["Drivers"].map(lambda v: (_parse_list_cell(v)[0] if _parse_list_cell(v) else ""))
+    if "Route_name" not in out.columns and "Route_names" in out.columns:
+        out["Route_name"] = out["Route_names"].map(lambda v: (_parse_list_cell(v)[0] if _parse_list_cell(v) else ""))
+
+    def _time_from_intervals(intervals_raw: Any, target_types: set[str]) -> str:
+        intervals = _load_intervals(intervals_raw)
+        for evt in intervals:
+            evt_type = str(evt.get("type") or "").strip().lower()
+            if evt_type in target_types:
+                return fmt_dt(to_local_dt(evt.get("time")))
+        return ""
+
+    if "out_for_delivery_time" not in out.columns:
+        out["out_for_delivery_time"] = out.get("Intervals", "").map(
+            lambda raw: _time_from_intervals(raw, {"out-for-delivery", "ofd", "outfordelivery"})
+        )
+    if "attempted_time" not in out.columns:
+        out["attempted_time"] = out.get("Intervals", "").map(
+            lambda raw: _time_from_intervals(raw, {"fail", "failed", "failure"})
+        )
+
+    return out
+
 def build_route_attempts_view(
     source_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
@@ -1537,6 +1585,7 @@ def main() -> None:
         )
 
         result_df = fill_route_identity_columns(result_df)
+        result_df = ensure_compatibility_columns(result_df)
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures

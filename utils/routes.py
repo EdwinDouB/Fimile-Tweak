@@ -773,12 +773,7 @@ def is_pod_compliant_for_event(event: dict[str, Any] | None, payload: dict[str, 
     if pod_count >= 3 and non_zero_scored_count >= 1:
         return True
 
-    # Fallback: some carriers do not return quality scores for every POD image,
-    # but the event still includes valid POD evidence.
-    if pod_count >= 1:
-        return True
-
-    return _event_has_pod_marker(event, payload=payload)
+    return False
 
 
 def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
@@ -937,15 +932,18 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
     intervals = build_intervals(events, payload=payload)
     is_delivered = any(str(x.get("type") or "").strip().lower() in {"success", "delivered"} for x in intervals)
 
-    scanned_predicate = lambda e: (
-        event_type(e) in {"scan", "warehouse", "picked-up", "pickup"}
-        or (
-            (desc := str(e.get("description", "")).strip().lower()).startswith("scan at")
-            or desc.startswith("scanned at")
-            or "scan" in desc
-        )
+    first_scanned_interval = next(
+        (
+            item
+            for item in intervals
+            if str(item.get("type") or "").strip().lower() == "warehouse"
+            or (
+                str(item.get("type") or "").strip().lower() == "sort"
+                and "scanned at" in str(item.get("description") or "").strip().lower()
+            )
+        ),
+        None,
     )
-    first_scanned_evt = first_event_by_predicate(events, scanned_predicate)
 
     ofd_events = events_by_predicate(events, lambda e: event_type(e) in {"out-for-delivery", "ofd", "outfordelivery"})
     fail_events = events_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
@@ -969,23 +967,10 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
             created_time_ms = None
 
     created_time = to_local_dt(created_time_ms)
-    first_scanned_time = to_local_dt(event_ts(first_scanned_evt) if first_scanned_evt else None)
-    out_for_delivery_time = to_local_dt(event_ts(ofd_evt) if ofd_evt else None)
-    attempted_time = to_local_dt(event_ts(fail_evt) if fail_evt else None)
+    first_scanned_time = to_local_dt(first_scanned_interval.get("time") if first_scanned_interval else None)
     delivered_time = to_local_dt(event_ts(success_evt) if success_evt else None)
 
-    failed_route = parse_route(event_description(fail_evt)) if fail_evt else ""
-    success_route = parse_route(event_description(success_evt)) if success_evt else ""
-    ofd_route = parse_route(event_description(ofd_evt)) if ofd_evt else ""
-    primary_route = choose_primary_route(
-        ofd_route=ofd_route,
-        failed_route=failed_route,
-        success_route=success_route,
-        fallback_route=latest_route,
-    )
-
     structured_identity = extract_route_identity_from_payload(payload)
-    route_name_value = str(structured_identity.get("Route_name") or primary_route or "").strip()
 
     raw_router_messages = ""
     if isinstance(payload, (dict, list)):
@@ -993,24 +978,48 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
     elif payload is not None:
         raw_router_messages = str(payload)
 
+    route_names: list[str] = []
+    contractors: list[str] = []
+    drivers: list[str] = []
+    seen_route_names: set[str] = set()
+    seen_contractors: set[str] = set()
+    seen_drivers: set[str] = set()
+
+    for event in ofd_events:
+        route_name = parse_route(event_description(event)).strip()
+        if route_name and route_name.lower() not in seen_route_names:
+            seen_route_names.add(route_name.lower())
+            route_names.append(route_name)
+        route_info = parse_route_identity(route_name) if route_name else {}
+        contractor_name = str(route_info.get("Contractor") or "").strip()
+        if contractor_name and contractor_name.lower() not in seen_contractors:
+            seen_contractors.add(contractor_name.lower())
+            contractors.append(contractor_name)
+        driver_name = str(route_info.get("Driver") or "").strip()
+        if driver_name and driver_name.lower() not in seen_drivers:
+            seen_drivers.add(driver_name.lower())
+            drivers.append(driver_name)
+
+    payload_contractor = str(structured_identity.get("Contractor") or "").strip()
+    if payload_contractor and payload_contractor.lower() not in seen_contractors:
+        contractors.append(payload_contractor)
+    payload_driver = str(structured_identity.get("Driver") or "").strip()
+    if payload_driver and payload_driver.lower() not in seen_drivers:
+        drivers.append(payload_driver)
+
     row: dict[str, str] = {
         "tracking_id": tracking_id,
-        "Driver": str(structured_identity.get("Driver") or "").strip(),
         "Hub": str(warehouse_hub or structured_identity.get("Hub") or scan_hub or "").strip(),
-        "Contractor": str(structured_identity.get("Contractor") or "").strip(),
+        "Contractors": json.dumps(contractors, ensure_ascii=False),
+        "Drivers": json.dumps(drivers, ensure_ascii=False),
+        "Route_names": json.dumps(route_names, ensure_ascii=False),
         "router_messages": raw_router_messages,
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
-        "last_scanned_time": fmt_dt(to_local_dt(event_ts(events[-1]) if events else None)),
-        "out_for_delivery_time": fmt_dt(out_for_delivery_time),
-        "attempted_time": fmt_dt(attempted_time),
+        "last_scanned_time": fmt_dt(to_local_dt(intervals[-1].get("time") if intervals else None)),
         "delivered_time": fmt_dt(delivered_time),
         "entered_costomer_service": "",
         "beans_pod_link": build_beans_tracking_link(tracking_id),
-        "ofd_route": ofd_route,
-        "failed_route": failed_route,
-        "success_route": success_route,
-        "Route_name": route_name_value,
         "Route_type": str(structured_identity.get("Route_type") or "delivery").strip(),
         "Intervals": json.dumps(intervals, ensure_ascii=False),
         "Is_delivered": "true" if is_delivered else "false",
@@ -1098,8 +1107,10 @@ def extract_route_identity_from_payload(payload: dict[str, Any]) -> dict[str, st
         "Route_name": route_name,
         "Route_names": route_name,
         "Driver": driver,
+        "Drivers": driver,
         "Hub": hub,
         "Contractor": contractor,
+        "Contractors": contractor,
         "Route_type": route_type,
     }
 
@@ -1168,13 +1179,15 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         df["Route_type"] = ""
 
     for idx, row in df.iterrows():
-        route_name = str(
-            row.get("Route_name")
-            or row.get("success_route")
-            or row.get("failed_route")
-            or row.get("ofd_route")
-            or ""
-        ).strip()
+        route_names_raw = row.get("Route_names") or ""
+        route_name = str(row.get("Route_name") or "").strip()
+        if (not route_name) and route_names_raw:
+            try:
+                loaded_routes = json.loads(route_names_raw) if isinstance(route_names_raw, str) else route_names_raw
+            except Exception:
+                loaded_routes = []
+            if isinstance(loaded_routes, list) and loaded_routes:
+                route_name = str(loaded_routes[0] or "").strip()
         fallback_state = str(row.get("State") or row.get("sender_province") or "")
         route_info = parse_route_identity(route_name, fallback_state=fallback_state)
         df.at[idx, "Route_name"] = route_name
