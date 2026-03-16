@@ -927,8 +927,12 @@ def build_row(tracking_id: str, payload: dict[str, Any]) -> dict[str, str]:
     is_delivered = any(str(x.get("type") or "").strip().lower() in {"success", "delivered"} for x in intervals)
 
     scanned_predicate = lambda e: (
-        (desc := str(e.get("description", "")).strip().lower()).startswith("scan at")
-        or desc.startswith("scanned at")
+        event_type(e) in {"scan", "warehouse", "picked-up", "pickup"}
+        or (
+            (desc := str(e.get("description", "")).strip().lower()).startswith("scan at")
+            or desc.startswith("scanned at")
+            or "scan" in desc
+        )
     )
     first_scanned_evt = first_event_by_predicate(events, scanned_predicate)
 
