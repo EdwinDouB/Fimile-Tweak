@@ -388,6 +388,15 @@ def render_compact_kpi_row(kpi_payload: dict[str, Any]) -> None:
         c3.metric("24h Attempt Rate", "0.00%", "0/0")
         c3.info("24h attempt share: no data available")
 
+
+def _metric_lookup(kpi_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    metrics = kpi_payload.get("metrics", []) if isinstance(kpi_payload, dict) else []
+    return {
+        str(item.get("metric")): item
+        for item in metrics
+        if isinstance(item, dict) and str(item.get("metric", "")).strip()
+    }
+
 def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
     chart_df = result_df.copy()
     chart_df["_created_date"] = to_datetime_series(chart_df, "created_time").dt.date
@@ -504,9 +513,13 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     )
 
     delivered_cols = st.columns(3)
-    delivered_metrics = [m for m in kpi_payload["metrics"] if m.get("category") == "delivery_rate_24_48_72"]
-    for i, metric in enumerate(delivered_metrics):
-        threshold = metric["metric"].replace("<", "").replace("h delivery rate", "")
+    metric_map = _metric_lookup(kpi_payload)
+    for i, threshold in enumerate([24, 48, 72]):
+        metric = metric_map.get(f"<{threshold}h delivery rate")
+        if not metric:
+            delivered_cols[i].metric(f"<{threshold}h delivery rate", "0.00%", "0/0")
+            delivered_cols[i].info("no data available")
+            continue
         delivered_cols[i].metric(
             metric["metric"],
             f"{metric['rate']:.2%}",
@@ -556,9 +569,12 @@ def render_kpi_charts(result_df: pd.DataFrame, layout_mode: str, fetch_reference
     )
 
     scan_cols = st.columns(4)
-    scan_metrics = [m for m in kpi_payload["metrics"] if m.get("category") == "scan_rate_12_24_48_72"]
-    for i, metric in enumerate(scan_metrics):
-        threshold = metric["metric"].replace("<", "").replace("h scan rate", "")
+    for i, threshold in enumerate([12, 24, 48, 72]):
+        metric = metric_map.get(f"<{threshold}h scan rate")
+        if not metric:
+            scan_cols[i].metric(f"<{threshold}h scan rate", "0.00%", "0/0")
+            scan_cols[i].info("no data available")
+            continue
         scan_cols[i].metric(
             metric["metric"],
             f"{metric['rate']:.2%}",
@@ -1105,11 +1121,6 @@ def main() -> None:
         if st.session_state.get("hide_unknown_dimensions", False):
             known_mask = (~filtered_df["Hub"].map(is_unknown_dimension_value)) & (~filtered_df["Contractor"].map(is_unknown_dimension_value))
             filtered_df = filtered_df[known_mask]
-
-
-
-        non_pickup_filtered_df, _ = split_pickup_routes(filtered_df)
-        filtered_df = non_pickup_filtered_df.copy()
 
         layout_mode = st.radio(
             tr("layout_mode_label"),
