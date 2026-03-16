@@ -1004,6 +1004,12 @@ def main() -> None:
 
         result_df = fill_route_identity_columns(result_df)
 
+        ofd_series = to_datetime_series(result_df, "out_for_delivery_time")
+        valid_ofd = ofd_series.dropna()
+        if not valid_ofd.empty:
+            st.session_state["delivery_filter_start"] = valid_ofd.min().date()
+            st.session_state["delivery_filter_end"] = valid_ofd.max().date()
+
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
 
