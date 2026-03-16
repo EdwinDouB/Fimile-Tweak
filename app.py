@@ -29,9 +29,11 @@ def _load_intervals(intervals_raw: Any) -> list[dict[str, Any]]:
     return []
 
 
-def build_route_attempts_view(source_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+def build_route_attempts_view(
+    source_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     if source_df.empty:
-        return pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
     success_types = {"success", "delivered"}
     fail_types = {"fail", "failed", "failure"}
@@ -39,6 +41,8 @@ def build_route_attempts_view(source_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
 
     route_rows: list[dict[str, Any]] = []
     unresolved_rows: list[dict[str, Any]] = []
+    canceled_rows: list[dict[str, Any]] = []
+    lost_rows: list[dict[str, Any]] = []
 
     for _, row in source_df.iterrows():
         tracking_id = str(row.get("tracking_id") or "").strip()
@@ -50,6 +54,20 @@ def build_route_attempts_view(source_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
                     "Hub": row.get("Hub", ""),
                     "created_time": row.get("created_time", ""),
                     "reason": "Intervals missing or invalid",
+                }
+            )
+            continue
+
+        last_event = intervals[-1] if intervals else {}
+        last_event_type = str(last_event.get("type") or "").strip().lower()
+        if last_event_type == "cancel":
+            canceled_rows.append(
+                {
+                    "tracking_id": tracking_id,
+                    "Hub": row.get("Hub", ""),
+                    "created_time": row.get("created_time", ""),
+                    "cancel_time": fmt_dt(to_local_dt(last_event.get("time"))),
+                    "reason": "Last event type is cancel",
                 }
             )
             continue
@@ -85,7 +103,7 @@ def build_route_attempts_view(source_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
                 search_idx += 1
 
             if matched_terminal is None:
-                unresolved_rows.append(
+                lost_rows.append(
                     {
                         "tracking_id": tracking_id,
                         "Hub": row.get("Hub", ""),
@@ -124,12 +142,18 @@ def build_route_attempts_view(source_df: pd.DataFrame) -> tuple[pd.DataFrame, pd
 
     route_df = pd.DataFrame(route_rows)
     unresolved_df = pd.DataFrame(unresolved_rows)
+    canceled_df = pd.DataFrame(canceled_rows)
+    lost_df = pd.DataFrame(lost_rows)
 
     if not route_df.empty:
         route_df = route_df.sort_values(by=["route", "out_for_delivery_time", "tracking_id"], na_position="last")
     if not unresolved_df.empty:
         unresolved_df = unresolved_df.sort_values(by=["reason", "tracking_id"], na_position="last")
-    return route_df, unresolved_df
+    if not canceled_df.empty:
+        canceled_df = canceled_df.sort_values(by=["tracking_id"], na_position="last")
+    if not lost_df.empty:
+        lost_df = lost_df.sort_values(by=["tracking_id"], na_position="last")
+    return route_df, unresolved_df, canceled_df, lost_df
 
 
 def render_percentage_pie(
@@ -1102,7 +1126,7 @@ def main() -> None:
                 file_name=f"customer_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv",
             )
-        route_attempts_df, unresolved_attempts_df = build_route_attempts_view(filtered_df)
+        route_attempts_df, unresolved_attempts_df, canceled_attempts_df, lost_attempts_df = build_route_attempts_view(filtered_df)
         st.subheader(tr("route_attempts_section"))
         if route_attempts_df.empty:
             st.info(tr("route_attempts_empty"))
@@ -1114,6 +1138,18 @@ def main() -> None:
             st.info(tr("route_attempts_unresolved_empty"))
         else:
             st.dataframe(unresolved_attempts_df, use_container_width=True)
+
+        st.subheader(tr("route_attempts_canceled_section"))
+        if canceled_attempts_df.empty:
+            st.info(tr("route_attempts_canceled_empty"))
+        else:
+            st.dataframe(canceled_attempts_df, use_container_width=True)
+
+        st.subheader(tr("route_attempts_lost_section"))
+        if lost_attempts_df.empty:
+            st.info(tr("route_attempts_lost_empty"))
+        else:
+            st.dataframe(lost_attempts_df, use_container_width=True)
 
         invalid_route_df = build_invalid_route_summary(filtered_df)
         st.subheader(tr("invalid_route_section"))
