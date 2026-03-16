@@ -403,6 +403,26 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
     return base
 
 
+def _filter_df_by_datetime_window(
+    source_df: pd.DataFrame,
+    datetime_column: str,
+    start_dt: datetime | None,
+    end_dt: datetime | None,
+) -> pd.DataFrame:
+    if source_df.empty or datetime_column not in source_df.columns:
+        return source_df
+    if start_dt is None and end_dt is None:
+        return source_df
+
+    dt_series = pd.to_datetime(source_df[datetime_column], errors="coerce")
+    mask = pd.Series(True, index=source_df.index)
+    if start_dt is not None:
+        mask &= dt_series >= start_dt
+    if end_dt is not None:
+        mask &= dt_series <= end_dt
+    return source_df.loc[mask].copy()
+
+
 def build_hub_scan_detail_table(source_df: pd.DataFrame, thresholds: list[int] | None = None) -> pd.DataFrame:
     thresholds = thresholds or [12, 24, 48, 72]
     if source_df.empty:
@@ -873,6 +893,9 @@ def render_kpi_charts(
     layout_mode: str,
     fetch_reference_time: datetime | None = None,
     route_attempts_df: pd.DataFrame | None = None,
+    report_start_dt: datetime | None = None,
+    report_end_dt: datetime | None = None,
+    exclude_atl_wdr: bool = True,
 ) -> dict[str, Any]:
     st.subheader(tr("kpi_title"))
     if result_df.empty:
@@ -886,12 +909,40 @@ def render_kpi_charts(
     refresh_key = str(int(fetch_reference_time.timestamp())) if fetch_reference_time else "no_fetch_ts"
     metric_map = _metric_lookup(kpi_payload)
     metric_source_df = route_attempts_df if route_attempts_df is not None else pd.DataFrame()
-    route_attempt_metrics = build_route_attempt_metrics(metric_source_df)
+
+    excluded_hubs = {"ATL", "WDR"}
+    metric_scope_df = metric_source_df.copy()
+    hub_scope_df = result_df.copy()
+
+    if exclude_atl_wdr:
+        if not metric_scope_df.empty and "Hub" in metric_scope_df.columns:
+            metric_scope_df = metric_scope_df[
+                ~metric_scope_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(excluded_hubs)
+            ].copy()
+        if not hub_scope_df.empty and "Hub" in hub_scope_df.columns:
+            hub_scope_df = hub_scope_df[
+                ~hub_scope_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(excluded_hubs)
+            ].copy()
+
+    dsp_metric_scope_df = _filter_df_by_datetime_window(
+        metric_scope_df,
+        "out_for_delivery_time",
+        start_dt=report_start_dt,
+        end_dt=report_end_dt,
+    )
+    hub_metric_scope_df = _filter_df_by_datetime_window(
+        hub_scope_df,
+        "created_time",
+        start_dt=report_start_dt,
+        end_dt=report_end_dt,
+    )
+
+    route_attempt_metrics = build_route_attempt_metrics(dsp_metric_scope_df)
 
     st.markdown("#### OFD派送时效看板（按每次派送计算）")
     st.caption("派送尝试时效指标已迁移至下方“DSP相关指标”。")
 
-    dsp_hub_metrics = build_dsp_hub_metrics(result_df, metric_source_df)
+    dsp_hub_metrics = build_dsp_hub_metrics(hub_metric_scope_df, dsp_metric_scope_df)
 
     st.markdown("#### DSP相关指标")
     dsp_cols = st.columns(2)
@@ -946,7 +997,7 @@ def render_kpi_charts(
     st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=intervals首节点到最近的warehouse或最近的type=sort且description含Scanned at节点，取耗时更短者并在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
 
     st.markdown("#### Hub上网率明细（分母/分子）")
-    hub_scan_detail_df = build_hub_scan_detail_table(result_df, thresholds=[12, 24, 48, 72])
+    hub_scan_detail_df = build_hub_scan_detail_table(hub_metric_scope_df, thresholds=[12, 24, 48, 72])
     hub_scan_header_cols = st.columns([4, 1])
     hub_scan_header_cols[1].download_button(
         "下载Hub上网率明细",
@@ -959,10 +1010,10 @@ def render_kpi_charts(
     st.dataframe(hub_scan_detail_df, use_container_width=True, hide_index=True)
 
     st.markdown(f"#### {tr('timeliness_quality_breakdown_title')}")
-    timeliness_quality_df = build_timeliness_quality_breakdown_table(metric_source_df, thresholds=[24, 48, 72])
+    timeliness_quality_df = build_timeliness_quality_breakdown_table(dsp_metric_scope_df, thresholds=[24, 48, 72])
     st.dataframe(style_breakdown_rows(timeliness_quality_df), use_container_width=True, hide_index=True)
 
-    attempt_detail_export_df = metric_source_df.copy()
+    attempt_detail_export_df = dsp_metric_scope_df.copy()
 
     attempt_header_cols = st.columns([4, 1])
     attempt_header_cols[1].download_button(
@@ -1332,6 +1383,16 @@ def main() -> None:
         st.session_state["query_end_date"] = default_query_end
     if "fetch_clicked_at" not in st.session_state:
         st.session_state["fetch_clicked_at"] = None
+    if "report_filter_start_date" not in st.session_state:
+        st.session_state["report_filter_start_date"] = None
+    if "report_filter_start_time" not in st.session_state:
+        st.session_state["report_filter_start_time"] = datetime.strptime("00:00", "%H:%M").time()
+    if "report_filter_end_date" not in st.session_state:
+        st.session_state["report_filter_end_date"] = None
+    if "report_filter_end_time" not in st.session_state:
+        st.session_state["report_filter_end_time"] = datetime.strptime("23:59", "%H:%M").time()
+    if "exclude_atl_wdr" not in st.session_state:
+        st.session_state["exclude_atl_wdr"] = True
     if "language" not in st.session_state:
         st.session_state["language"] = "zh"
     if "unknown_contractor_overrides" not in st.session_state:
@@ -1387,6 +1448,17 @@ def main() -> None:
     if raw_ids:
         with st.expander(tr("db_preview", count=len(raw_ids)), expanded=False):
             st.write(raw_ids[:50])
+
+    st.markdown("#### 报表时间戳（可选）")
+    timestamp_cols = st.columns(2)
+    with timestamp_cols[0]:
+        st.date_input("起始时间 - 日期", key="report_filter_start_date", value=None)
+        st.time_input("起始时间 - 时间", key="report_filter_start_time")
+    with timestamp_cols[1]:
+        st.date_input("截止时间 - 日期", key="report_filter_end_date", value=None)
+        st.time_input("截止时间 - 时间", key="report_filter_end_time")
+
+    st.toggle("是否去除 WDR 和 ATL（默认开启）", key="exclude_atl_wdr", value=True)
 
     cleaned, dedup_ids, counter = normalize_tracking_ids(raw_ids, uppercase=False)
     duplicate_ids = [k for k, v in counter.items() if v > 1]
@@ -1530,6 +1602,26 @@ def main() -> None:
 
         filtered_df = result_df
 
+        report_start_dt = None
+        report_end_dt = None
+        if st.session_state.get("report_filter_start_date") is not None:
+            report_start_dt = datetime.combine(
+                st.session_state["report_filter_start_date"],
+                st.session_state.get("report_filter_start_time"),
+            )
+        if st.session_state.get("report_filter_end_date") is not None:
+            report_end_dt = datetime.combine(
+                st.session_state["report_filter_end_date"],
+                st.session_state.get("report_filter_end_time"),
+            )
+
+        excluded_hub_df = pd.DataFrame()
+        excluded_hub_route_attempts_df = pd.DataFrame()
+        if st.session_state.get("exclude_atl_wdr", True):
+            excluded_hub_df = filtered_df[
+                filtered_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(["ATL", "WDR"])
+            ].copy()
+
         layout_mode = st.radio(
             tr("layout_mode_label"),
             options=["detailed", "compact"],
@@ -1540,13 +1632,29 @@ def main() -> None:
         )
 
         route_attempts_df, unresolved_attempts_df, canceled_attempts_df, lost_attempts_df = build_route_attempts_view(filtered_df)
+        if not excluded_hub_df.empty:
+            excluded_hub_route_attempts_df, _, _, _ = build_route_attempts_view(excluded_hub_df)
 
         kpi_payload = render_kpi_charts(
             filtered_df,
             layout_mode=layout_mode,
             fetch_reference_time=st.session_state.get("fetch_clicked_at"),
             route_attempts_df=route_attempts_df,
+            report_start_dt=report_start_dt,
+            report_end_dt=report_end_dt,
+            exclude_atl_wdr=bool(st.session_state.get("exclude_atl_wdr", True)),
         )
+
+        if st.session_state.get("exclude_atl_wdr", True):
+            with st.expander("ATL/WDR 数据隔离区（不计入指标计算）", expanded=False):
+                st.caption("当开启“去除WDR和ATL”时，这两个Hub的数据会在指标计算中排除，但会保留在此处单独展示。")
+                st.write(f"ATL/WDR 总记录数：{len(excluded_hub_df)}")
+                if excluded_hub_df.empty:
+                    st.info("当前没有 ATL/WDR 数据。")
+                else:
+                    st.dataframe(excluded_hub_df, use_container_width=True)
+                    st.markdown("**ATL/WDR Route尝试明细**")
+                    st.dataframe(excluded_hub_route_attempts_df, use_container_width=True)
 
         success_count = len(result_df) - len(failures)
         fail_count = len(failures)
