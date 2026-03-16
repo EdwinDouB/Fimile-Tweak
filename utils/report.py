@@ -93,6 +93,37 @@ def _build_delivery_attempts_df(source_df: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(attempts)
 
+
+def _parse_attempt_event_time(series: pd.Series) -> pd.Series:
+    """Parse event timestamps supporting unix-ms/unix-s/ISO text."""
+    if series.empty:
+        return pd.to_datetime(series, errors="coerce")
+
+    text_series = series.astype("object")
+    numeric = pd.to_numeric(text_series, errors="coerce")
+    parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+
+    numeric_mask = numeric.notna()
+    if numeric_mask.any():
+        numeric_values = numeric[numeric_mask]
+        millisecond_mask = numeric_values.abs() >= 1e11
+        if millisecond_mask.any():
+            parsed.loc[numeric_values[millisecond_mask].index] = pd.to_datetime(
+                numeric_values[millisecond_mask], unit="ms", errors="coerce", utc=True
+            ).dt.tz_convert(None)
+
+        second_mask = ~millisecond_mask
+        if second_mask.any():
+            parsed.loc[numeric_values[second_mask].index] = pd.to_datetime(
+                numeric_values[second_mask], unit="s", errors="coerce", utc=True
+            ).dt.tz_convert(None)
+
+    fallback_mask = parsed.isna()
+    if fallback_mask.any():
+        parsed.loc[fallback_mask] = pd.to_datetime(text_series[fallback_mask], errors="coerce", utc=True).dt.tz_convert(None)
+
+    return parsed
+
 def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
     if detail_df is None or detail_df.empty:
         return pd.DataFrame(columns=["Dimension", "Sample Count", "<24h Hit", "<24h Delivery Rate", "<48h Hit", "<48h Delivery Rate", "<72h Hit", "<72h Delivery Rate"])
@@ -324,8 +355,8 @@ def build_kpi_report_payload(
 
     attempt_level_df = _build_delivery_attempts_df(non_pickup_df)
     if not attempt_level_df.empty:
-        attempt_level_df["ofd_dt"] = pd.to_datetime(attempt_level_df["out_for_delivery_time"], unit="ms", errors="coerce", utc=True).dt.tz_convert(None)
-        attempt_level_df["terminal_dt"] = pd.to_datetime(attempt_level_df["terminal_time"], unit="ms", errors="coerce", utc=True).dt.tz_convert(None)
+        attempt_level_df["ofd_dt"] = _parse_attempt_event_time(attempt_level_df["out_for_delivery_time"])
+        attempt_level_df["terminal_dt"] = _parse_attempt_event_time(attempt_level_df["terminal_time"])
         attempt_level_df["ofd_to_terminal_hours"] = (
             attempt_level_df["terminal_dt"] - attempt_level_df["ofd_dt"]
         ).dt.total_seconds() / 3600
