@@ -432,25 +432,104 @@ def normalize_events(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
+EVENT_TYPE_ALIASES = {
+    "out for delivery": "out-for-delivery",
+    "out-for-delivery": "out-for-delivery",
+    "ofd": "out-for-delivery",
+    "delivered": "success",
+    "delivery success": "success",
+    "success": "success",
+    "failed": "fail",
+    "failure": "fail",
+    "delivery failed": "fail",
+    "attempted": "fail",
+    "cancelled": "cancel",
+    "canceled": "cancel",
+}
+
+
+def _normalize_event_type_text(value: Any) -> str:
+    text = str(value or "").strip().lower().replace("_", "-")
+    if not text:
+        return ""
+
+    compact = re.sub(r"\s+", " ", text)
+    if compact in EVENT_TYPE_ALIASES:
+        return EVENT_TYPE_ALIASES[compact]
+
+    if "out" in compact and "delivery" in compact:
+        return "out-for-delivery"
+    if "deliver" in compact and "fail" in compact:
+        return "fail"
+    if "deliver" in compact and "success" in compact:
+        return "success"
+    if compact in {"warehouse", "scan", "picked-up", "picked up", "pickup"}:
+        return compact.replace(" ", "-")
+
+    return compact
+
+
 def event_type(event: dict[str, Any]) -> str:
-    for key in ("type", "eventType", "status"):
+    for key in (
+        "type",
+        "eventType",
+        "status",
+        "readableStatus",
+        "itemReadableStatus",
+        "statusName",
+        "itemStatus",
+        "nodeStatus",
+    ):
         val = event.get(key)
         if val:
-            return str(val).strip().lower().replace("_", "-")
+            normalized = _normalize_event_type_text(val)
+            if normalized:
+                return normalized
 
     log_item = event.get("logItem")
     if isinstance(log_item, dict):
-        for key in ("type", "eventType", "status"):
+        for key in (
+            "type",
+            "eventType",
+            "status",
+            "readableStatus",
+            "itemReadableStatus",
+            "statusName",
+            "itemStatus",
+            "nodeStatus",
+        ):
             val = log_item.get(key)
             if val:
-                return str(val).strip().lower().replace("_", "-")
+                normalized = _normalize_event_type_text(val)
+                if normalized:
+                    return normalized
 
     log_obj = event.get("log")
     if isinstance(log_obj, dict):
-        for key in ("type", "eventType", "status"):
+        for key in (
+            "type",
+            "eventType",
+            "status",
+            "readableStatus",
+            "itemReadableStatus",
+            "statusName",
+            "itemStatus",
+            "nodeStatus",
+        ):
             val = log_obj.get(key)
             if val:
-                return str(val).strip().lower().replace("_", "-")
+                normalized = _normalize_event_type_text(val)
+                if normalized:
+                    return normalized
+
+    description = event_description(event).lower()
+    if "out for delivery" in description:
+        return "out-for-delivery"
+    if "delivery failed" in description or "attempted" in description:
+        return "fail"
+    if "delivered" in description:
+        return "success"
+
     return ""
 
 
