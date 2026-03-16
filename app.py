@@ -264,13 +264,21 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
         pod_total = len(attempt_df)
         base["dsp"]["pod_qualified_rate"] = {"hit": pod_hit, "total": pod_total, "rate": rate(pod_hit, pod_total)}
 
-    non_cancel_rows = 0
+    total_tracking_rows = len(source_df)
     first_to_warehouse_hours: list[float] = []
     canceled_count = 0
     intercept_success_count = 0
     warehouse_base_count = 0
     warehouse_lost_count = 0
     dsp_lost_count = 0
+
+    def _is_warehouse_type(type_value: str) -> bool:
+        normalized = str(type_value or "").strip().lower()
+        return "warehouse" in normalized
+
+    def _is_sorting_type(type_value: str) -> bool:
+        normalized = str(type_value or "").strip().lower()
+        return "sorting" in normalized
 
     for _, row in source_df.iterrows():
         intervals = _load_intervals(row.get("Intervals"))
@@ -300,17 +308,16 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
             )
             if not has_delivery_before_cancel:
                 intercept_success_count += 1
-        else:
-            non_cancel_rows += 1
-
-            first_warehouse_item = next((item for item in normalized_events if item["type"] == "warehouse"), None)
-            if first_warehouse_item is not None:
-                elapsed_hours = (first_warehouse_item["dt"] - first_event_time).total_seconds() / 3600
-                if elapsed_hours >= 0:
-                    first_to_warehouse_hours.append(elapsed_hours)
+        first_warehouse_item = next((item for item in normalized_events if _is_warehouse_type(item["type"])), None)
+        if first_warehouse_item is not None:
+            elapsed_hours = (first_warehouse_item["dt"] - first_event_time).total_seconds() / 3600
+            if elapsed_hours >= 0:
+                first_to_warehouse_hours.append(elapsed_hours)
 
         warehouse_or_sorting_indices = [
-            idx for idx, item in enumerate(normalized_events) if item["type"] in {"warehouse", "sorting"}
+            idx
+            for idx, item in enumerate(normalized_events)
+            if _is_warehouse_type(item["type"]) or _is_sorting_type(item["type"])
         ]
         if warehouse_or_sorting_indices:
             warehouse_base_count += 1
@@ -328,8 +335,8 @@ def build_dsp_hub_metrics(source_df: pd.DataFrame, route_attempts_df: pd.DataFra
         hit = int(sum(hours < threshold for hours in first_to_warehouse_hours))
         base["hub"]["scan_rates"][f"{threshold}h"] = {
             "hit": hit,
-            "total": non_cancel_rows,
-            "rate": rate(hit, non_cancel_rows),
+            "total": total_tracking_rows,
+            "rate": rate(hit, total_tracking_rows),
         }
 
     avg_hours = float(sum(first_to_warehouse_hours) / len(first_to_warehouse_hours)) if first_to_warehouse_hours else 0.0
@@ -695,6 +702,17 @@ def render_kpi_charts(
     route_attempt_metrics = build_route_attempt_metrics(metric_source_df)
 
     st.markdown("#### OFD派送时效看板（按每次派送计算）")
+    st.caption("派送尝试时效指标已迁移至下方“DSP相关指标”。")
+
+    dsp_hub_metrics = build_dsp_hub_metrics(result_df, metric_source_df)
+
+    st.markdown("#### DSP相关指标")
+    dsp_cols = st.columns(2)
+    pod_metric = dsp_hub_metrics["dsp"]["pod_qualified_rate"]
+    dsp_lost_metric = dsp_hub_metrics["dsp"]["lost_rate"]
+    dsp_cols[0].metric("POD合格率", f"{pod_metric['rate']:.2%}", f"{pod_metric['hit']}/{pod_metric['total']}")
+    dsp_cols[1].metric("DSP丢件率（OFD后无后续轨迹）", f"{dsp_lost_metric['rate']:.2%}", f"{dsp_lost_metric['hit']}/{dsp_lost_metric['total']}")
+
     metric_specs = ["24h妥投率", "48h妥投率", "72h妥投率", "24h尝试率"]
     metric_cols = st.columns(len(metric_specs))
     for i, label in enumerate(metric_specs):
@@ -720,16 +738,7 @@ def render_kpi_charts(
             container=pie_cols[i],
         )
 
-    st.caption("口径：基于“按派送尝试整理的Route明细”表计算，分母=该表全部条目。")
-
-    dsp_hub_metrics = build_dsp_hub_metrics(result_df, metric_source_df)
-
-    st.markdown("#### DSP相关指标")
-    dsp_cols = st.columns(2)
-    pod_metric = dsp_hub_metrics["dsp"]["pod_qualified_rate"]
-    dsp_lost_metric = dsp_hub_metrics["dsp"]["lost_rate"]
-    dsp_cols[0].metric("POD合格率", f"{pod_metric['rate']:.2%}", f"{pod_metric['hit']}/{pod_metric['total']}")
-    dsp_cols[1].metric("DSP丢件率（OFD后无后续轨迹）", f"{dsp_lost_metric['rate']:.2%}", f"{dsp_lost_metric['hit']}/{dsp_lost_metric['total']}")
+    st.caption("派送尝试时效口径：基于“按派送尝试整理的Route明细”表计算，分母=该表全部条目。")
 
     st.markdown("#### Hub相关指标")
     hub_scan_specs = ["12h", "24h", "48h", "72h"]
@@ -747,7 +756,7 @@ def render_kpi_charts(
     hub_cols[1].metric("拦截成功率", f"{intercept_metric['rate']:.2%}", f"{intercept_metric['hit']}/{intercept_metric['total']}")
     hub_cols[2].metric("仓库丢件率（最后warehouse/sorting后无后续轨迹）", f"{warehouse_lost_metric['rate']:.2%}", f"{warehouse_lost_metric['hit']}/{warehouse_lost_metric['total']}")
 
-    st.caption("Hub口径：上网率与首仓时效分母=非取消件；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
+    st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=首轨迹到最近warehouse在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
 
     st.markdown(f"#### {tr('timeliness_quality_breakdown_title')}")
     timeliness_quality_df = build_timeliness_quality_breakdown_table(metric_source_df, thresholds=[24, 48, 72])
