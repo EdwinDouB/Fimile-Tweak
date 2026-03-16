@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
+import ast
 import json
 
 import utils.db as db
@@ -25,7 +26,10 @@ def _load_intervals(intervals_raw: Any) -> list[dict[str, Any]]:
         try:
             loaded = json.loads(text)
         except Exception:
-            return []
+            try:
+                loaded = ast.literal_eval(text)
+            except Exception:
+                return []
         if isinstance(loaded, list):
             return [item for item in loaded if isinstance(item, dict)]
     return []
