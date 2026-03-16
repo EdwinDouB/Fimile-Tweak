@@ -857,10 +857,19 @@ def main() -> None:
         st.session_state["hub_filter"] = "ALL"
     if "contractor_filter" not in st.session_state:
         st.session_state["contractor_filter"] = "ALL"
+    today = date.today()
+    tomorrow = today + timedelta(days=1)
+    date_input_min = today - timedelta(days=365 * 5)
+    date_input_max = today + timedelta(days=365 * 2)
+
+    if "query_start_date" not in st.session_state:
+        st.session_state["query_start_date"] = today
+    if "query_end_date" not in st.session_state:
+        st.session_state["query_end_date"] = tomorrow
     if "delivery_filter_start" not in st.session_state:
-        st.session_state["delivery_filter_start"] = date.today() - timedelta(days=7)
+        st.session_state["delivery_filter_start"] = today
     if "delivery_filter_end" not in st.session_state:
-        st.session_state["delivery_filter_end"] = date.today()
+        st.session_state["delivery_filter_end"] = tomorrow
     if "fetch_clicked_at" not in st.session_state:
         st.session_state["fetch_clicked_at"] = None
     if "language" not in st.session_state:
@@ -886,21 +895,26 @@ def main() -> None:
     st.subheader(tr("input_section"))
     st.caption(f"{tr('input_mode')}: {tr('mode_db')}")
 
-    test_preset_start = date(2026, 3, 4)
-    test_preset_end = date(2026, 3, 5)
-    st.caption(
-        tr(
-            "test_preset_notice",
-            start=test_preset_start.strftime("%Y/%m/%d"),
-            end=test_preset_end.strftime("%Y/%m/%d"),
-        )
-    )
+    st.session_state["query_start_date"] = min(max(st.session_state["query_start_date"], date_input_min), date_input_max)
+    st.session_state["query_end_date"] = min(max(st.session_state["query_end_date"], date_input_min), date_input_max)
+    st.session_state["delivery_filter_start"] = min(max(st.session_state["delivery_filter_start"], date_input_min), date_input_max)
+    st.session_state["delivery_filter_end"] = min(max(st.session_state["delivery_filter_end"], date_input_min), date_input_max)
 
     c1, c2 = st.columns(2)
     with c1:
-        start_d = st.date_input(tr("start_date"), value=test_preset_start, disabled=True)
+        start_d = st.date_input(
+            tr("start_date"),
+            key="query_start_date",
+            min_value=date_input_min,
+            max_value=date_input_max,
+        )
     with c2:
-        end_d = st.date_input(tr("end_date"), value=test_preset_end, disabled=True)
+        end_d = st.date_input(
+            tr("end_date"),
+            key="query_end_date",
+            min_value=date_input_min,
+            max_value=date_input_max,
+        )
 
     raw_ids: list[str] = st.session_state.get("db_raw_ids", [])
     manual_run_btn = st.button(tr("load_merge_btn"), type="primary", key="load_merge_btn")
@@ -1003,12 +1017,6 @@ def main() -> None:
         )
 
         result_df = fill_route_identity_columns(result_df)
-
-        ofd_series = to_datetime_series(result_df, "out_for_delivery_time")
-        valid_ofd = ofd_series.dropna()
-        if not valid_ofd.empty:
-            st.session_state["delivery_filter_start"] = valid_ofd.min().date()
-            st.session_state["delivery_filter_end"] = valid_ofd.max().date()
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
@@ -1149,8 +1157,8 @@ def main() -> None:
                 st.session_state["driver_filter"] = all_value
                 st.session_state["hub_filter"] = all_value
                 st.session_state["contractor_filter"] = all_value
-                st.session_state["delivery_filter_start"] = date.today() - timedelta(days=7)
-                st.session_state["delivery_filter_end"] = date.today()
+                st.session_state["delivery_filter_start"] = today
+                st.session_state["delivery_filter_end"] = tomorrow
                 st.rerun()
 
         delivery_filter_c1, delivery_filter_c2 = st.columns(2)
@@ -1158,11 +1166,15 @@ def main() -> None:
             delivery_filter_start = st.date_input(
                 tr("delivery_filter_start"),
                 key="delivery_filter_start",
+                min_value=date_input_min,
+                max_value=date_input_max,
             )
         with delivery_filter_c2:
             delivery_filter_end = st.date_input(
                 tr("delivery_filter_end"),
                 key="delivery_filter_end",
+                min_value=date_input_min,
+                max_value=date_input_max,
             )
 
         filtered_df = _apply_dimension_filters(
