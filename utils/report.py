@@ -171,7 +171,10 @@ def _parse_attempt_event_time(series: pd.Series) -> pd.Series:
 
 def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
     if detail_df is None or detail_df.empty:
-        return pd.DataFrame(columns=["Dimension", "Sample Count", "<24h Hit", "<24h Delivery Rate", "<48h Hit", "<48h Delivery Rate", "<72h Hit", "<72h Delivery Rate"])
+        return pd.DataFrame(columns=[
+            "Dimension", "Sample Count", "<24h Hit", "<24h Delivery Rate", "<48h Hit", "<48h Delivery Rate", "<72h Hit", "<72h Delivery Rate",
+            "<12h Scan Rate", "<24h Scan Rate", "<48h Scan Rate", "<72h Scan Rate", "POD Qualified Rate", "24h Attempt Rate", "DSP Lost Rate", "Warehouse Lost Rate", "Intercept Success Rate", "Monthly Lost Rate",
+        ])
 
     source_df = detail_df.copy()
     ofd_col = _resolve_ofd_column(source_df)
@@ -196,6 +199,27 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
             hit = int(sub_df[f"within_{threshold}h"].sum()) if total_count > 0 else 0
             row[f"<{threshold}h Hit"] = hit
             row[f"<{threshold}h Delivery Rate"] = rate(hit, total_count)
+
+        sub_payload = build_kpi_report_payload(sub_df)
+        metric_map = {
+            str(item.get("metric")): item
+            for item in sub_payload.get("metrics", [])
+            if isinstance(item, dict)
+        }
+        pod_rate_from_data = 0.0
+        if "POD是否合格" in sub_df.columns and len(sub_df) > 0:
+            pod_hit = int(sub_df["POD是否合格"].fillna("").astype(str).str.strip().eq("是").sum())
+            pod_rate_from_data = rate(pod_hit, len(sub_df))
+        row["<12h Scan Rate"] = metric_map.get("<12h scan rate", {}).get("rate", 0.0)
+        row["<24h Scan Rate"] = metric_map.get("<24h scan rate", {}).get("rate", 0.0)
+        row["<48h Scan Rate"] = metric_map.get("<48h scan rate", {}).get("rate", 0.0)
+        row["<72h Scan Rate"] = metric_map.get("<72h scan rate", {}).get("rate", 0.0)
+        row["POD Qualified Rate"] = metric_map.get("POD qualified rate", {}).get("rate", pod_rate_from_data or metric_map.get("Manual POD qualified rate", {}).get("rate", 0.0))
+        row["24h Attempt Rate"] = metric_map.get("24h attempt rate", {}).get("rate", 0.0)
+        row["DSP Lost Rate"] = metric_map.get("DSP lost rate", {}).get("rate", 0.0)
+        row["Warehouse Lost Rate"] = metric_map.get("Warehouse lost rate", {}).get("rate", 0.0)
+        row["Intercept Success Rate"] = metric_map.get("Intercept success rate", {}).get("rate", 0.0)
+        row["Monthly Lost Rate"] = metric_map.get("lost rate", {}).get("rate", 0.0)
         rows.append(row)
 
     rows: list[dict[str, Any]] = []
@@ -242,6 +266,27 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str) -> pd.DataFrame:
             hit = int(sub_df[f"within_{threshold}h"].sum()) if total_count > 0 else 0
             row[f"<{threshold}h Hit"] = hit
             row[f"<{threshold}h Delivery Rate"] = rate(hit, total_count)
+
+        sub_payload = build_kpi_report_payload(sub_df)
+        metric_map = {
+            str(item.get("metric")): item
+            for item in sub_payload.get("metrics", [])
+            if isinstance(item, dict)
+        }
+        pod_rate_from_data = 0.0
+        if "POD是否合格" in sub_df.columns and len(sub_df) > 0:
+            pod_hit = int(sub_df["POD是否合格"].fillna("").astype(str).str.strip().eq("是").sum())
+            pod_rate_from_data = rate(pod_hit, len(sub_df))
+        row["<12h Scan Rate"] = metric_map.get("<12h scan rate", {}).get("rate", 0.0)
+        row["<24h Scan Rate"] = metric_map.get("<24h scan rate", {}).get("rate", 0.0)
+        row["<48h Scan Rate"] = metric_map.get("<48h scan rate", {}).get("rate", 0.0)
+        row["<72h Scan Rate"] = metric_map.get("<72h scan rate", {}).get("rate", 0.0)
+        row["POD Qualified Rate"] = metric_map.get("POD qualified rate", {}).get("rate", pod_rate_from_data or metric_map.get("Manual POD qualified rate", {}).get("rate", 0.0))
+        row["24h Attempt Rate"] = metric_map.get("24h attempt rate", {}).get("rate", 0.0)
+        row["DSP Lost Rate"] = metric_map.get("DSP lost rate", {}).get("rate", 0.0)
+        row["Warehouse Lost Rate"] = metric_map.get("Warehouse lost rate", {}).get("rate", 0.0)
+        row["Intercept Success Rate"] = metric_map.get("Intercept success rate", {}).get("rate", 0.0)
+        row["Monthly Lost Rate"] = metric_map.get("lost rate", {}).get("rate", 0.0)
         rows.append(row)
 
     _append_row(hub_name, hub_df)
@@ -278,7 +323,7 @@ def _style_overview_worksheet(worksheet, table_df: pd.DataFrame, start_row: int,
                 worksheet.write(start_row + ridx, cidx, str(val), row_fmt)
 
     worksheet.set_column(0, 0, 28)
-    worksheet.set_column(1, 7, 18)
+    worksheet.set_column(1, max(len(table_df.columns) - 1, 1), 18)
 
 def _sanitize_sheet_name(name: str) -> str:
     invalid_chars = set('[]:*?/\\')
@@ -322,12 +367,14 @@ def _insert_dashboard_charts(
         "<48h delivery rate": (chart_row, chart_col + 8),
         "<72h delivery rate": (chart_row, chart_col + 16),
         "12/24/48/72 scan rate": (chart_row + 16, chart_col),
-        "Manual POD qualified rate": (chart_row + 32, chart_col),
+        "POD qualified rate": (chart_row + 32, chart_col),
         "24h attempt rate": (chart_row + 32, chart_col + 8),
         "lost rate": (chart_row + 32, chart_col + 16),
+        "DSP lost rate": (chart_row + 48, chart_col),
+        "Warehouse lost rate": (chart_row + 48, chart_col + 8),
     }
 
-    for chart_name in ["<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "Manual POD qualified rate", "24h attempt rate", "lost rate"]:
+    for chart_name in ["<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "POD qualified rate", "24h attempt rate", "lost rate", "DSP lost rate", "Warehouse lost rate"]:
         group = chart_df[chart_df["chart"] == chart_name]
         if group.empty:
             continue
@@ -686,6 +733,11 @@ def kpi_report_to_excel_bytes(
     metrics_df = pd.DataFrame(kpi_payload["metrics"])
     chart_df = pd.DataFrame(kpi_payload["charts"])
 
+    if not chart_df.empty and "chart" in chart_df.columns:
+        chart_df["chart"] = chart_df["chart"].replace({"Manual POD qualified rate": "POD qualified rate"})
+    if not metrics_df.empty and "metric" in metrics_df.columns:
+        metrics_df["metric"] = metrics_df["metric"].replace({"Manual POD qualified rate": "POD qualified rate"})
+
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         workbook = writer.book
         detailed_layout_ready = layout_mode == "detailed" and detail_df is not None and not detail_df.empty
@@ -763,7 +815,7 @@ def kpi_report_to_excel_bytes(
                             chart_name = str(rec.get("chart", ""))
                             category = str(rec.get("category", "")).strip().lower()
                             excel_row = ridx + 1
-                            if chart_name == "Manual POD qualified rate":
+                            if chart_name in {"Manual POD qualified rate", "POD qualified rate"}:
                                 if "not" in category:
                                     writer.sheets["kpi_chart_data"].write_formula(excel_row, 2, f'={_countif_sum("No")}')
                                 else:
@@ -783,6 +835,31 @@ def kpi_report_to_excel_bytes(
             pod_review_df = build_kpi_report_payload(source_df).get("pod_review_df")
         if isinstance(pod_review_df, pd.DataFrame):
             pod_review_df.to_excel(writer, index=False, sheet_name="manual_review_data")
+
+        if source_df is not None and not source_df.empty:
+            lost_analysis = build_lost_package_analysis(source_df)
+            lost_mask = lost_analysis.get("lost_mask", pd.Series(dtype=bool))
+            lost_detail_columns = [
+                "tracking_id",
+                "Region",
+                "State",
+                "shipperName",
+                "Hub",
+                "Contractor",
+                "Route_name",
+                "created_time",
+                "first_scanned_time",
+                "last_scanned_time",
+                "out_for_delivery_time",
+                "attempted_time",
+                "delivered_time",
+            ]
+            lost_detail_df = source_df.loc[lost_mask].copy() if len(lost_mask) == len(source_df) else pd.DataFrame(columns=lost_detail_columns)
+            for column in lost_detail_columns:
+                if column not in lost_detail_df.columns:
+                    lost_detail_df[column] = pd.NA
+            lost_detail_df = lost_detail_df[lost_detail_columns]
+            lost_detail_df.to_excel(writer, index=False, sheet_name="lost_detail_data")
 
         if not detailed_layout_ready:
             data_ws = writer.sheets["kpi_chart_data"]
@@ -804,6 +881,9 @@ def kpi_report_to_excel_bytes(
             pod_ws.set_column(0, 16, 20)
             pod_ws.set_column(17, 17, 60)
             pod_ws.set_column(18, 20, 24)
+        if "lost_detail_data" in writer.sheets:
+            lost_ws = writer.sheets["lost_detail_data"]
+            lost_ws.set_column(0, 12, 20)
         if not detailed_layout_ready:
             row_cursor = 0
             col_cursor = 0

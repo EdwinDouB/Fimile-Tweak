@@ -1048,6 +1048,15 @@ def render_kpi_charts(
     _upsert_kpi_metric_and_chart(
         kpi_payload,
         category="dsp_assessment",
+        metric_name="POD qualified rate",
+        hit_count=int(dsp_hub_metrics["dsp"]["pod_qualified_rate"]["hit"]),
+        total_count=int(dsp_hub_metrics["dsp"]["pod_qualified_rate"]["total"]),
+        hit_label="Qualified",
+        miss_label="Not qualified",
+    )
+    _upsert_kpi_metric_and_chart(
+        kpi_payload,
+        category="dsp_assessment",
         metric_name="DSP lost rate",
         hit_count=int(dsp_hub_metrics["dsp"]["lost_rate"]["hit"]),
         total_count=int(dsp_hub_metrics["dsp"]["lost_rate"]["total"]),
@@ -1317,7 +1326,7 @@ def build_layout_specific_report_payload(kpi_payload: dict[str, Any], layout_mod
     if layout_mode != "compact":
         return kpi_payload
 
-    compact_metric_names = {"<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "Manual POD qualified rate", "24h attempt rate", "DSP lost rate", "Warehouse lost rate", "Intercept success rate"}
+    compact_metric_names = {"<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "POD qualified rate", "24h attempt rate", "DSP lost rate", "Warehouse lost rate", "Intercept success rate"}
     compact_metrics = [m for m in kpi_payload.get("metrics", []) if m.get("metric") in compact_metric_names]
     compact_charts = [c for c in kpi_payload.get("charts", []) if c.get("chart") in compact_metric_names]
 
@@ -1864,7 +1873,13 @@ def main() -> None:
             st.dataframe(invalid_route_df, use_container_width=True)
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        export_df = build_layout_specific_export_df(filtered_df, layout_mode)
+        export_base_df = filtered_df.copy()
+        if st.session_state.get("exclude_atl_wdr", True) and "Hub" in export_base_df.columns:
+            export_base_df = export_base_df[
+                ~export_base_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(["ATL", "WDR"])
+            ].copy()
+
+        export_df = build_layout_specific_export_df(export_base_df, layout_mode)
         csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
         report_payload = build_layout_specific_report_payload(kpi_payload, layout_mode)
         kpi_report_data = None
@@ -1875,13 +1890,13 @@ def main() -> None:
             file_name=f"export_{layout_mode}_{stamp}.csv",
             mime="text/csv",
         )
-        report_detail_df = build_detailed_report_detail_df(filtered_df) if layout_mode == "detailed" else export_df
+        report_detail_df = build_detailed_report_detail_df(export_base_df) if layout_mode == "detailed" else export_df
         try:
             kpi_report_data = kpi_report_to_excel_bytes(
                 report_payload,
                 report_detail_df,
                 layout_mode=layout_mode,
-                source_df=filtered_df,
+                source_df=export_base_df,
             )
             c_report.download_button(
                 tr("download_report"),
