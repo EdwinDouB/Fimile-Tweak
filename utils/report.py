@@ -492,6 +492,136 @@ def _insert_dashboard_charts(
     worksheet.set_column(data_col, data_col + 3, 14)
 
 
+def _weight_bucket_labels() -> list[str]:
+    return [
+        "1-30",
+        "31-40",
+        "41-50",
+        "51-60",
+        "61-70",
+        "71-80",
+        "81-90",
+        "91-100",
+        "101-110",
+        "111-120",
+        "121-130",
+        "131-140",
+        "141-150",
+        "150+",
+    ]
+
+
+def _weight_bucket_bins() -> list[float]:
+    return [0, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, float("inf")]
+
+
+def _resolve_weight_distribution(df: pd.DataFrame, dimension_col: str | None = None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    weight_col = next((col for col in ["Weight", "weight", "package_weight"] if col in df.columns), None)
+    if weight_col is None:
+        return pd.DataFrame()
+
+    labels = _weight_bucket_labels()
+    weight_series = pd.to_numeric(df[weight_col], errors="coerce")
+    valid_df = df[weight_series.notna() & (weight_series > 0)].copy()
+    if valid_df.empty:
+        return pd.DataFrame()
+
+    valid_df["_weight_bucket"] = pd.cut(
+        pd.to_numeric(valid_df[weight_col], errors="coerce"),
+        bins=_weight_bucket_bins(),
+        labels=labels,
+        include_lowest=True,
+    )
+
+    if dimension_col is None:
+        counts = (
+            valid_df.groupby("_weight_bucket", observed=False)
+            .size()
+            .reindex(labels, fill_value=0)
+            .astype(int)
+        )
+        return pd.DataFrame([{"维度": "总体", **counts.to_dict()}])
+
+    if dimension_col not in valid_df.columns:
+        return pd.DataFrame()
+
+    dimension_series = valid_df[dimension_col].fillna(f"Unknown {dimension_col}").astype(str).str.strip().replace("", f"Unknown {dimension_col}")
+    grouped = (
+        valid_df.assign(_dimension=dimension_series)
+        .groupby(["_dimension", "_weight_bucket"], observed=False)
+        .size()
+        .unstack(fill_value=0)
+        .reindex(columns=labels, fill_value=0)
+        .astype(int)
+        .reset_index()
+        .rename(columns={"_dimension": "维度"})
+        .sort_values("维度")
+    )
+    return grouped
+
+
+def _write_weight_distribution_section(
+    worksheet,
+    workbook,
+    start_row: int,
+    title: str,
+    table_df: pd.DataFrame,
+    chart_anchor_col: int,
+) -> int:
+    if table_df.empty:
+        return start_row
+
+    title_fmt = workbook.add_format({"bold": True, "font_size": 12})
+    header_fmt = workbook.add_format({"bold": True, "bg_color": "#e5e7eb", "border": 1})
+    cell_fmt = workbook.add_format({"border": 1})
+
+    worksheet.write(start_row, 0, title, title_fmt)
+    header_row = start_row + 1
+    for cidx, col in enumerate(table_df.columns):
+        worksheet.write(header_row, cidx, col, header_fmt)
+
+    for ridx, (_, row) in enumerate(table_df.iterrows(), start=header_row + 1):
+        for cidx, col in enumerate(table_df.columns):
+            worksheet.write(ridx, cidx, row[col], cell_fmt)
+
+    worksheet.set_column(0, 0, 22)
+    worksheet.set_column(1, max(len(table_df.columns) - 1, 1), 10)
+
+    first_data_row = header_row + 1
+    last_data_row = header_row + len(table_df)
+    last_col = len(table_df.columns) - 1
+    chart_opts = {"type": "column"}
+    if len(table_df) > 1:
+        chart_opts["subtype"] = "stacked"
+    chart = workbook.add_chart(chart_opts)
+    if len(table_df) == 1:
+        chart.add_series(
+            {
+                "name": title,
+                "categories": [worksheet.get_name(), header_row, 1, header_row, last_col],
+                "values": [worksheet.get_name(), first_data_row, 1, first_data_row, last_col],
+                "data_labels": {"value": True},
+            }
+        )
+    else:
+        for cidx in range(1, len(table_df.columns)):
+            chart.add_series(
+                {
+                    "name": [worksheet.get_name(), header_row, cidx],
+                    "categories": [worksheet.get_name(), first_data_row, 0, last_data_row, 0],
+                    "values": [worksheet.get_name(), first_data_row, cidx, last_data_row, cidx],
+                }
+            )
+    chart.set_title({"name": title})
+    chart.set_legend({"position": "bottom"})
+    worksheet.insert_chart(start_row, chart_anchor_col, chart, {"x_scale": 1.2, "y_scale": 1.1})
+
+    return last_data_row + 3
+
+
 
 def build_kpi_report_payload(
     result_df: pd.DataFrame,
@@ -631,6 +761,7 @@ def build_kpi_report_payload(
         "event_code",
         "event_readable",
         "out_for_delivery_time",
+        "Weight",
         "attempted_time",
         "delivered_time",
         "beans_link",
@@ -918,6 +1049,24 @@ def kpi_report_to_excel_bytes(
             overview_ws = workbook.add_worksheet("overview")
             overview_table = _build_detailed_overview_table(detail_df, source_df=source_df)
             _style_overview_worksheet(overview_ws, overview_table, 0, workbook)
+            next_row = len(overview_table) + 3
+            if source_df is not None and not source_df.empty:
+                next_row = _write_weight_distribution_section(
+                    overview_ws,
+                    workbook,
+                    next_row,
+                    "总体重量段（这个表的表头为维度的重量段分布）",
+                    _resolve_weight_distribution(source_df),
+                    chart_anchor_col=max(len(overview_table.columns) + 2, 16),
+                )
+                next_row = _write_weight_distribution_section(
+                    overview_ws,
+                    workbook,
+                    next_row,
+                    "每个仓库的重量段（这一页表格每一行为维度）",
+                    _resolve_weight_distribution(source_df, "Hub"),
+                    chart_anchor_col=max(len(overview_table.columns) + 2, 16),
+                )
             _insert_dashboard_charts(
                 overview_ws,
                 workbook,
@@ -951,6 +1100,23 @@ def kpi_report_to_excel_bytes(
                 sheet_name = _sanitize_sheet_name(f"HUB_{hub_name}")
                 hub_ws = workbook.add_worksheet(sheet_name)
                 _style_overview_worksheet(hub_ws, hub_table, 0, workbook)
+                hub_next_row = len(hub_table) + 3
+                hub_next_row = _write_weight_distribution_section(
+                    hub_ws,
+                    workbook,
+                    hub_next_row,
+                    "仓库总重量段（这个表的表头为维度的重量段分布）",
+                    _resolve_weight_distribution(hub_df),
+                    chart_anchor_col=max(len(hub_table.columns) + 2, 16),
+                )
+                hub_next_row = _write_weight_distribution_section(
+                    hub_ws,
+                    workbook,
+                    hub_next_row,
+                    "每个Contractor的重量段（这一页表格每一行为维度）",
+                    _resolve_weight_distribution(hub_df, "Contractor"),
+                    chart_anchor_col=max(len(hub_table.columns) + 2, 16),
+                )
                 _insert_dashboard_charts(
                     hub_ws,
                     workbook,
