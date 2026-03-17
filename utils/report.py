@@ -216,13 +216,8 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame, source_df: pd.DataFr
         row["<24h Scan Rate"] = _metric_rate(metric_map, "<24h scan rate")
         row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
         row["<72h Scan Rate"] = _metric_rate(metric_map, "<72h scan rate")
-        row["POD Qualified Rate"] = _metric_rate(metric_map, "POD qualified rate") or pod_rate_from_data or _metric_rate(metric_map, "Manual POD qualified rate")
-        attempt_elapsed_hours = (
-            to_datetime_series(sub_df, "finish_time") - to_datetime_series(sub_df, "out_for_delivery_time")
-        ).dt.total_seconds() / 3600 if not sub_df.empty else pd.Series(dtype=float)
-        attempt_hit = int(((sub_df.get("result", pd.Series(dtype=str)).fillna("").astype(str).str.lower().isin(["success", "fail"]))
-                           & attempt_elapsed_hours.notna() & (attempt_elapsed_hours >= 0) & (attempt_elapsed_hours < 24)).sum()) if total_count > 0 else 0
-        row["24h Attempt Rate"] = rate(attempt_hit, total_count)
+        row["POD Qualified Rate"] = _first_available_metric_rate(metric_map, ["POD qualified rate", "Manual POD qualified rate"]) or pod_rate_from_data
+        row["24h Attempt Rate"] = _metric_rate(metric_map, "24h attempt rate")
         row["DSP Lost Rate"] = 1 - _metric_rate(metric_map, "DSP lost rate")
         row["Warehouse Lost Rate"] = 1 - _metric_rate(metric_map, "Warehouse lost rate")
         row["Intercept Success Rate"] = _metric_rate(metric_map, "Intercept success rate")
@@ -306,13 +301,8 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str, source_df: pd.DataF
         row["<24h Scan Rate"] = _metric_rate(metric_map, "<24h scan rate")
         row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
         row["<72h Scan Rate"] = _metric_rate(metric_map, "<72h scan rate")
-        row["POD Qualified Rate"] = _metric_rate(metric_map, "POD qualified rate") or pod_rate_from_data or _metric_rate(metric_map, "Manual POD qualified rate")
-        attempt_elapsed_hours = (
-            to_datetime_series(sub_df, "finish_time") - to_datetime_series(sub_df, "out_for_delivery_time")
-        ).dt.total_seconds() / 3600 if not sub_df.empty else pd.Series(dtype=float)
-        attempt_hit = int(((sub_df.get("result", pd.Series(dtype=str)).fillna("").astype(str).str.lower().isin(["success", "fail"]))
-                           & attempt_elapsed_hours.notna() & (attempt_elapsed_hours >= 0) & (attempt_elapsed_hours < 24)).sum()) if total_count > 0 else 0
-        row["24h Attempt Rate"] = rate(attempt_hit, total_count)
+        row["POD Qualified Rate"] = _first_available_metric_rate(metric_map, ["POD qualified rate", "Manual POD qualified rate"]) or pod_rate_from_data
+        row["24h Attempt Rate"] = _metric_rate(metric_map, "24h attempt rate")
         row["DSP Lost Rate"] = 1 - _metric_rate(metric_map, "DSP lost rate")
         row["Warehouse Lost Rate"] = 1 - _metric_rate(metric_map, "Warehouse lost rate")
         row["Intercept Success Rate"] = _metric_rate(metric_map, "Intercept success rate")
@@ -371,6 +361,13 @@ def _metric_rate(metric_map: dict[str, dict[str, Any]], metric_name: str) -> flo
     if total:
         return rate(hit, total)
     return float(direct_rate or 0.0)
+
+
+def _first_available_metric_rate(metric_map: dict[str, dict[str, Any]], metric_names: list[str]) -> float:
+    for metric_name in metric_names:
+        if metric_name in metric_map:
+            return _metric_rate(metric_map, metric_name)
+    return 0.0
 
 
 def _insert_dashboard_charts(
@@ -817,13 +814,7 @@ def build_kpi_report_payload(
     )
 
     total_package_count = len(df)
-    dsp_lost_ids = set(
-        attempt_base.loc[attempt_base["attempt_result"] == "lost", "tracking_id"].astype(str)
-    ) if (not attempt_base.empty and "tracking_id" in attempt_base.columns) else set()
-    warehouse_lost_ids = set(
-        scanned_base.loc[scanned_base["lost"] == 1, "tracking_id"].astype(str)
-    ) if (not scanned_base.empty and "tracking_id" in scanned_base.columns) else set()
-    combined_lost_hit = len(dsp_lost_ids.union(warehouse_lost_ids))
+    combined_lost_hit = dsp_lost_hit + warehouse_lost_hit
     combined_lost_total = total_package_count
 
     metrics.append(
@@ -975,7 +966,15 @@ def kpi_report_to_excel_bytes(
 
         if source_df is not None and not source_df.empty:
             lost_analysis = build_lost_package_analysis(source_df)
-            lost_mask = lost_analysis.get("lost_mask", pd.Series(dtype=bool))
+            warehouse_lost_mask = lost_analysis.get("lost_mask", pd.Series(False, index=source_df.index))
+            attempt_level_source_df = build_attempt_kpi_detail_df(source_df)
+            dsp_lost_tracking_ids = set(
+                attempt_level_source_df.loc[
+                    attempt_level_source_df["attempt_result"] == "lost", "tracking_id"
+                ].astype(str)
+            ) if (not attempt_level_source_df.empty and "tracking_id" in attempt_level_source_df.columns) else set()
+            dsp_lost_mask = source_df["tracking_id"].astype(str).isin(dsp_lost_tracking_ids) if "tracking_id" in source_df.columns else pd.Series(False, index=source_df.index)
+            lost_mask = warehouse_lost_mask.reindex(source_df.index, fill_value=False) | dsp_lost_mask.reindex(source_df.index, fill_value=False)
             lost_detail_columns = [
                 "tracking_id",
                 "Region",
