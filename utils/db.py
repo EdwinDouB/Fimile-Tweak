@@ -347,6 +347,71 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
 
 
 @st.cache_data(ttl=60, show_spinner=False)
+def fetch_waybill_profile_map(tracking_ids: tuple[str, ...]) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """Fetch receive_province + sender profile in one DB round trip."""
+    _require_db_env()
+
+    try:
+        import pymysql  # type: ignore
+    except Exception as e:
+        raise RuntimeError("Missing dependency: pymysql. Please run: pip install pymysql") from e
+
+    if not tracking_ids:
+        return {}, {}
+
+    tracking_ids_clean = tuple(str(tid).strip() for tid in tracking_ids if str(tid).strip())
+    if not tracking_ids_clean:
+        return {}, {}
+
+    config = _load_mysql_config()
+    conn = pymysql.connect(
+        host=str(config["host"]),
+        port=int(config["port"]),
+        user=str(config["username"]),
+        password=str(config["password"]),
+        database=str(config["database"]),
+        charset="utf8mb4",
+        cursorclass=pymysql.cursors.DictCursor,
+        autocommit=True,
+    )
+
+    receive_province_map: dict[str, str] = {}
+    sender_info_map: dict[str, dict[str, str]] = {}
+
+    try:
+        with conn.cursor() as cur:
+            chunk_size = 500
+            for i in range(0, len(tracking_ids_clean), chunk_size):
+                chunk = tracking_ids_clean[i : i + chunk_size]
+                placeholders = ", ".join(["%s"] * len(chunk))
+                sql = f"""
+                    SELECT tracking_number, receive_province, sender_company, sender_province, sender_city, sender_address
+                    FROM waybill_waybills
+                    WHERE tracking_number IN ({placeholders})
+                """
+                cur.execute(sql, chunk)
+                while True:
+                    rows = cur.fetchmany(DB_FETCH_BATCH_SIZE)
+                    if not rows:
+                        break
+                    for row in rows:
+                        tracking_number = str(row.get("tracking_number") or "").strip()
+                        if not tracking_number:
+                            continue
+                        receive_province_map[tracking_number] = str(row.get("receive_province") or "").strip()
+                        sender_info_map[tracking_number] = {
+                            "sender_company": str(row.get("sender_company") or "").strip(),
+                            "sender_province": str(row.get("sender_province") or "").strip(),
+                            "sender_city": str(row.get("sender_city") or "").strip(),
+                            "sender_address": str(row.get("sender_address") or "").strip(),
+                        }
+    finally:
+        conn.close()
+
+    return receive_province_map, sender_info_map
+
+
+@st.cache_data(ttl=60, show_spinner=False)
 def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
     """Load latest cached router_messages JSON by tracking_number."""
     _require_db_env()
@@ -398,13 +463,30 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
             for i in range(0, len(tracking_ids_clean), chunk_size):
                 chunk = tracking_ids_clean[i : i + chunk_size]
                 placeholders = ", ".join(["%s"] * len(chunk))
-                sql = f"""
-                    SELECT tracking_number, router_messages
-                    FROM {table_name}
-                    WHERE tracking_number IN ({placeholders})
-                    AND router_messages IS NOT NULL
-                    {order_sql}
-                """
+                if order_column:
+                    sql = f"""
+                        SELECT t.tracking_number, t.router_messages
+                        FROM {table_name} t
+                        INNER JOIN (
+                            SELECT tracking_number, MAX({order_column}) AS latest_order
+                            FROM {table_name}
+                            WHERE tracking_number IN ({placeholders})
+                            AND router_messages IS NOT NULL
+                            GROUP BY tracking_number
+                        ) latest
+                        ON latest.tracking_number = t.tracking_number
+                        AND latest.latest_order = t.{order_column}
+                        WHERE t.router_messages IS NOT NULL
+                        {order_sql}
+                    """
+                else:
+                    sql = f"""
+                        SELECT tracking_number, router_messages
+                        FROM {table_name}
+                        WHERE tracking_number IN ({placeholders})
+                        AND router_messages IS NOT NULL
+                        {order_sql}
+                    """
                 cur.execute(sql, chunk)
 
                 while True:
@@ -446,6 +528,7 @@ def clear_query_caches() -> None:
         fetch_tracking_numbers_by_delivery_window,
         fetch_receive_province_map,
         fetch_sender_info_map,
+        fetch_waybill_profile_map,
         fetch_router_messages_map,
     ):
         fn.clear()
