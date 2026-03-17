@@ -515,22 +515,30 @@ def _weight_bucket_bins() -> list[float]:
     return [0, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, float("inf")]
 
 
+def _resolve_weight_series(df: pd.DataFrame) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype="float64")
+
+    weight_candidates = ["Weight", "weight", "package_weight"]
+    for col in weight_candidates:
+        if col in df.columns:
+            return pd.to_numeric(df[col], errors="coerce")
+    return pd.Series([float("nan")] * len(df), index=df.index, dtype="float64")
+
+
 def _resolve_weight_distribution(df: pd.DataFrame, dimension_col: str | None = None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame()
 
-    weight_col = next((col for col in ["Weight", "weight", "package_weight"] if col in df.columns), None)
-    if weight_col is None:
-        return pd.DataFrame()
-
     labels = _weight_bucket_labels()
-    weight_series = pd.to_numeric(df[weight_col], errors="coerce")
+    weight_series = _resolve_weight_series(df)
     valid_df = df[weight_series.notna() & (weight_series > 0)].copy()
     if valid_df.empty:
         return pd.DataFrame()
 
+    valid_df["_resolved_weight"] = weight_series.loc[valid_df.index]
     valid_df["_weight_bucket"] = pd.cut(
-        pd.to_numeric(valid_df[weight_col], errors="coerce"),
+        valid_df["_resolved_weight"],
         bins=_weight_bucket_bins(),
         labels=labels,
         include_lowest=True,
@@ -738,6 +746,8 @@ def build_kpi_report_payload(
     review_base["beans_link"] = review_base["tracking_id"].astype(str).map(
         lambda tid: f'=HYPERLINK("https://www.beansroute.ai/3pl-manager/tabs.html#searchTrackingId/{tid}", "Open Beans POD")'
     )
+    review_base["package_weight"] = _resolve_weight_series(review_base)
+    review_base["Weight"] = review_base["package_weight"]
     review_base["out_for_delivery_time"] = review_base.get(ofd_col, "")
     review_base["manual_pod_review_status"] = "Pending"
     review_base["manual_review_note"] = ""
@@ -761,6 +771,7 @@ def build_kpi_report_payload(
         "event_code",
         "event_readable",
         "out_for_delivery_time",
+        "package_weight",
         "Weight",
         "attempted_time",
         "delivered_time",
