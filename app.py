@@ -1667,12 +1667,8 @@ def main() -> None:
         st.session_state["fetch_clicked_at"] = None
     if "report_filter_start_date" not in st.session_state:
         st.session_state["report_filter_start_date"] = None
-    if "report_filter_start_time" not in st.session_state:
-        st.session_state["report_filter_start_time"] = datetime.strptime("00:00", "%H:%M").time()
     if "report_filter_end_date" not in st.session_state:
         st.session_state["report_filter_end_date"] = None
-    if "report_filter_end_time" not in st.session_state:
-        st.session_state["report_filter_end_time"] = datetime.strptime("23:59", "%H:%M").time()
     if "exclude_atl_wdr" not in st.session_state:
         st.session_state["exclude_atl_wdr"] = True
     if "language" not in st.session_state:
@@ -1731,14 +1727,12 @@ def main() -> None:
         with st.expander(tr("db_preview", count=len(raw_ids)), expanded=False):
             st.write(raw_ids[:50])
 
-    st.markdown("#### 报表时间戳（可选）")
+    st.markdown("#### 报表时间筛选（按日期，可选）")
     timestamp_cols = st.columns(2)
     with timestamp_cols[0]:
         st.date_input("起始时间 - 日期", key="report_filter_start_date", value=None)
-        st.time_input("起始时间 - 时间", key="report_filter_start_time")
     with timestamp_cols[1]:
         st.date_input("截止时间 - 日期", key="report_filter_end_date", value=None)
-        st.time_input("截止时间 - 时间", key="report_filter_end_time")
 
     st.toggle("是否去除 WDR 和 ATL（默认开启）", key="exclude_atl_wdr", value=True)
 
@@ -1887,15 +1881,9 @@ def main() -> None:
         report_start_dt = None
         report_end_dt = None
         if st.session_state.get("report_filter_start_date") is not None:
-            report_start_dt = datetime.combine(
-                st.session_state["report_filter_start_date"],
-                st.session_state.get("report_filter_start_time"),
-            )
+            report_start_dt = datetime.combine(st.session_state["report_filter_start_date"], datetime.min.time())
         if st.session_state.get("report_filter_end_date") is not None:
-            report_end_dt = datetime.combine(
-                st.session_state["report_filter_end_date"],
-                st.session_state.get("report_filter_end_time"),
-            )
+            report_end_dt = datetime.combine(st.session_state["report_filter_end_date"], datetime.max.time())
 
         excluded_hub_df = pd.DataFrame()
         excluded_hub_route_attempts_df = pd.DataFrame()
