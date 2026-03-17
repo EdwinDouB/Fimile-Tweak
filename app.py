@@ -893,6 +893,50 @@ def _metric_lookup(kpi_payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         if isinstance(item, dict) and str(item.get("metric", "")).strip()
     }
 
+
+def _upsert_kpi_metric_and_chart(
+    kpi_payload: dict[str, Any],
+    *,
+    category: str,
+    metric_name: str,
+    hit_count: int,
+    total_count: int,
+    hit_label: str,
+    miss_label: str,
+) -> None:
+    metrics = kpi_payload.setdefault("metrics", [])
+    charts = kpi_payload.setdefault("charts", [])
+
+    metrics = [m for m in metrics if not (isinstance(m, dict) and m.get("metric") == metric_name)]
+    charts = [c for c in charts if not (isinstance(c, dict) and c.get("chart") == metric_name)]
+
+    metric_rate = rate(hit_count, total_count)
+    metrics.append(
+        {
+            "category": category,
+            "metric": metric_name,
+            "hit": int(hit_count),
+            "total": int(total_count),
+            "rate": metric_rate,
+        }
+    )
+
+    miss_count = max(int(total_count) - int(hit_count), 0)
+    charts.extend(
+        [
+            {"chart": metric_name, "category": hit_label, "count": int(hit_count), "rate": metric_rate},
+            {
+                "chart": metric_name,
+                "category": miss_label,
+                "count": miss_count,
+                "rate": rate(miss_count, total_count),
+            },
+        ]
+    )
+
+    kpi_payload["metrics"] = metrics
+    kpi_payload["charts"] = charts
+
 def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
     chart_df = result_df.copy()
     chart_df["_created_date"] = to_datetime_series(chart_df, "created_time").dt.date
@@ -1000,6 +1044,34 @@ def render_kpi_charts(
     st.caption("派送尝试时效指标已迁移至下方“DSP相关指标”。")
 
     dsp_hub_metrics = build_dsp_hub_metrics(hub_metric_scope_df, dsp_metric_scope_df)
+
+    _upsert_kpi_metric_and_chart(
+        kpi_payload,
+        category="dsp_assessment",
+        metric_name="DSP lost rate",
+        hit_count=int(dsp_hub_metrics["dsp"]["lost_rate"]["hit"]),
+        total_count=int(dsp_hub_metrics["dsp"]["lost_rate"]["total"]),
+        hit_label="Lost after OFD",
+        miss_label="Not lost",
+    )
+    _upsert_kpi_metric_and_chart(
+        kpi_payload,
+        category="hub_assessment",
+        metric_name="Warehouse lost rate",
+        hit_count=int(dsp_hub_metrics["hub"]["warehouse_lost_rate"]["hit"]),
+        total_count=int(dsp_hub_metrics["hub"]["warehouse_lost_rate"]["total"]),
+        hit_label="Warehouse/sorting lost",
+        miss_label="Not lost",
+    )
+    _upsert_kpi_metric_and_chart(
+        kpi_payload,
+        category="hub_assessment",
+        metric_name="Intercept success rate",
+        hit_count=int(dsp_hub_metrics["hub"]["intercept_success_rate"]["hit"]),
+        total_count=int(dsp_hub_metrics["hub"]["intercept_success_rate"]["total"]),
+        hit_label="Intercepted successfully",
+        miss_label="Intercept failed",
+    )
 
     st.markdown("#### DSP相关指标")
     dsp_cols = st.columns(2)
@@ -1245,7 +1317,7 @@ def build_layout_specific_report_payload(kpi_payload: dict[str, Any], layout_mod
     if layout_mode != "compact":
         return kpi_payload
 
-    compact_metric_names = {"<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "Manual POD qualified rate", "24h attempt rate"}
+    compact_metric_names = {"<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "Manual POD qualified rate", "24h attempt rate", "DSP lost rate", "Warehouse lost rate", "Intercept success rate"}
     compact_metrics = [m for m in kpi_payload.get("metrics", []) if m.get("metric") in compact_metric_names]
     compact_charts = [c for c in kpi_payload.get("charts", []) if c.get("chart") in compact_metric_names]
 
@@ -1299,14 +1371,10 @@ def build_detailed_report_detail_df(filtered_df: pd.DataFrame) -> pd.DataFrame:
         "Hub",
         "Contractor",
         "Route_name",
-        "first_out_for_delivery_date",
-        "first_failed_date",
+        "out_for_delivery_time",
+        "attempted_time",
         "first_pod_complience",
-        "second_out_for_delivery_date",
-        "second_failed_date",
         "second_pod_complience",
-        "third_out_for_delivery_date",
-        "third_failed_date",
         "third_pod_complience",
         "entered_costomer_service",
         "beans_pod_link",
