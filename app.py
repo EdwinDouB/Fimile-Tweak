@@ -2,6 +2,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 import ast
 import json
+import re
 
 import utils.db as db
 import utils.report as report_utils
@@ -1531,6 +1532,105 @@ def process_tracking_ids(
     ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
     return pd.DataFrame(ordered_rows, columns=result_columns), failures
 
+
+def _parse_address_components(full_address: Any) -> dict[str, str]:
+    """Parse a full US-style address into address/state/city components."""
+    address = str(full_address or "").strip()
+    if not address:
+        return {"address": "", "state": "", "city": ""}
+
+    parts = [part.strip() for part in address.split(",") if str(part).strip()]
+    state = ""
+    city = ""
+
+    if len(parts) >= 4:
+        city = parts[-3]
+        state = parts[-2]
+    elif len(parts) == 3:
+        city = parts[-2]
+        state_match = re.search(r"\b([A-Za-z]{2})\b", parts[-1])
+        state = state_match.group(1).upper() if state_match else parts[-1]
+    elif len(parts) == 2:
+        city = parts[-1]
+
+    state = re.sub(r"[^A-Za-z]", "", str(state)).upper()[:2]
+    city = str(city or "").strip()
+
+    return {
+        "address": address,
+        "state": state,
+        "city": city,
+    }
+
+
+def _extract_address_maps_from_router_payload(
+    dedup_ids: list[str],
+    router_messages_map: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """
+    Build receiver-state map and sender-info map from router_messages label events.
+
+    Receiver: event type=label and description contains "Label created" (but not pickup label).
+    Sender: event type=label and description contains "Pickup label created".
+    """
+    receive_province_map: dict[str, str] = {}
+    sender_info_map: dict[str, dict[str, str]] = {}
+
+    for tracking_id in dedup_ids:
+        payload = router_messages_map.get(tracking_id)
+        if isinstance(payload, str):
+            text_payload = payload.strip()
+            if text_payload:
+                try:
+                    payload = json.loads(text_payload)
+                except json.JSONDecodeError:
+                    payload = None
+
+        if not isinstance(payload, (dict, list)):
+            continue
+
+        events = normalize_events(payload)
+        receiver_address = ""
+        sender_address = ""
+
+        for event in events:
+            if str(event.get("type") or "").strip().lower() != "label":
+                continue
+
+            description = str(event.get("description") or "").strip().lower()
+            item = event.get("item")
+            address = ""
+            if isinstance(item, dict):
+                address = str(item.get("address") or "").strip()
+            if not address:
+                continue
+
+            if "pickup label created" in description:
+                if not sender_address:
+                    sender_address = address
+                continue
+
+            if "label created" in description and not receiver_address:
+                receiver_address = address
+
+            if receiver_address and sender_address:
+                break
+
+        receiver_parts = _parse_address_components(receiver_address)
+        sender_parts = _parse_address_components(sender_address)
+
+        if receiver_parts["state"]:
+            receive_province_map[tracking_id] = receiver_parts["state"]
+
+        sender_info_map[tracking_id] = {
+            "sender_company": "",
+            "sender_province": sender_parts["state"],
+            "sender_city": sender_parts["city"],
+            "sender_address": sender_parts["address"],
+        }
+
+    return receive_province_map, sender_info_map
+
 def main() -> None:
     st.set_page_config(page_title="Fimile US Shipment Operations Dashboard", layout="wide")
     st.title(tr("app_title"))
@@ -1669,20 +1769,6 @@ def main() -> None:
             status.text(message)
 
         try:
-            receive_province_map = fetch_receive_province_map(tuple(dedup_ids))
-        except Exception as e:
-            st.warning(tr("state_region_fail", error=e))
-        finally:
-            update_setup_progress("Loading recipient location data...")
-
-        try:
-            sender_info_map = fetch_sender_info_map(tuple(dedup_ids))
-        except Exception:
-            sender_info_map = {}
-        finally:
-            update_setup_progress("Loading sender profile data...")
-
-        try:
             fetch_router_messages = getattr(db, "fetch_router_messages_map", None)
             if callable(fetch_router_messages):
                 router_messages_map = fetch_router_messages(tuple(dedup_ids))
@@ -1699,6 +1785,19 @@ def main() -> None:
             router_messages_map = {}
         finally:
             update_setup_progress("Loading route event payloads...")
+
+        try:
+            receive_province_map, sender_info_map = _extract_address_maps_from_router_payload(
+                dedup_ids,
+                router_messages_map,
+            )
+        except Exception as e:
+            st.warning(tr("state_region_fail", error=e))
+            receive_province_map = {}
+            sender_info_map = {}
+        finally:
+            update_setup_progress("Loading recipient location data...")
+            update_setup_progress("Loading sender profile data...")
 
         result_df, failures = process_tracking_ids(
             dedup_ids=dedup_ids,

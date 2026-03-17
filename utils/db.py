@@ -34,6 +34,7 @@ def _resolve_router_messages_table(conn: Any) -> str:
 
     candidates = [
         preferred,
+        "third_party_transit_cache",
         "transit_third_party_cache",
         "third_party_cache",
         "transit_router_messages_cache",
