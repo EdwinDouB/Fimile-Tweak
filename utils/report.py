@@ -841,9 +841,26 @@ def build_kpi_report_payload(
         ]
     )
 
-    total_package_count = len(df)
-    combined_lost_hit = dsp_lost_hit + warehouse_lost_hit
-    combined_lost_total = total_package_count
+    if "tracking_id" in df.columns and not df.empty:
+        all_tracking_ids = set(df["tracking_id"].astype(str))
+    else:
+        all_tracking_ids = set(df.index.astype(str))
+
+    dsp_lost_tracking_ids = set()
+    if not attempt_base.empty and "tracking_id" in attempt_base.columns:
+        dsp_lost_tracking_ids = set(
+            attempt_base.loc[attempt_base["attempt_result"] == "lost", "tracking_id"].astype(str)
+        )
+
+    warehouse_lost_tracking_ids = set()
+    if "tracking_id" in scanned_base.columns and not scanned_base.empty:
+        warehouse_lost_tracking_ids = set(
+            scanned_base.loc[scanned_base["lost"] == 1, "tracking_id"].astype(str)
+        )
+
+    combined_lost_tracking_ids = dsp_lost_tracking_ids | warehouse_lost_tracking_ids
+    combined_lost_hit = len(combined_lost_tracking_ids)
+    combined_lost_total = len(all_tracking_ids)
 
     metrics.append(
         {
@@ -1020,16 +1037,18 @@ def kpi_report_to_excel_bytes(
                 "lost_source",
             ]
 
-            warehouse_rows = source_df.loc[warehouse_lost_mask.reindex(source_df.index, fill_value=False)].copy() if len(warehouse_lost_mask) == len(source_df) else pd.DataFrame()
-            if not warehouse_rows.empty:
-                warehouse_rows["lost_source"] = "warehouse_lost_numerator"
+            warehouse_mask = warehouse_lost_mask.reindex(source_df.index, fill_value=False) if len(warehouse_lost_mask) == len(source_df) else pd.Series(False, index=source_df.index)
+            dsp_mask = dsp_lost_mask.reindex(source_df.index, fill_value=False) if len(dsp_lost_mask) == len(source_df) else pd.Series(False, index=source_df.index)
+            combined_lost_mask = warehouse_mask | dsp_mask
 
-            dsp_rows = source_df.loc[dsp_lost_mask.reindex(source_df.index, fill_value=False)].copy() if len(dsp_lost_mask) == len(source_df) else pd.DataFrame()
-            if not dsp_rows.empty:
-                dsp_rows["lost_source"] = "dsp_lost_numerator"
-
-            if not warehouse_rows.empty or not dsp_rows.empty:
-                lost_detail_df = pd.concat([warehouse_rows, dsp_rows], ignore_index=True)
+            if combined_lost_mask.any():
+                lost_detail_df = source_df.loc[combined_lost_mask].copy()
+                lost_detail_df["lost_source"] = ""
+                lost_detail_df.loc[warehouse_mask[combined_lost_mask], "lost_source"] = "warehouse_lost_numerator"
+                lost_detail_df.loc[dsp_mask[combined_lost_mask], "lost_source"] = lost_detail_df.loc[dsp_mask[combined_lost_mask], "lost_source"].replace("", "dsp_lost_numerator")
+                both_mask = warehouse_mask[combined_lost_mask] & dsp_mask[combined_lost_mask]
+                lost_detail_df.loc[both_mask, "lost_source"] = "warehouse_lost_numerator+dsp_lost_numerator"
+                lost_detail_df = lost_detail_df.drop_duplicates(subset=["tracking_id"], keep="first") if "tracking_id" in lost_detail_df.columns else lost_detail_df.drop_duplicates(keep="first")
             else:
                 lost_detail_df = pd.DataFrame(columns=lost_detail_columns)
 
