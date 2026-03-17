@@ -1026,6 +1026,7 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
     ofd_evt = ofd_events[0] if ofd_events else None
     warehouse_hub = infer_hub_from_pre_ofd_warehouse(events, ofd_evt)
     scan_hub = infer_hub_from_pre_ofd_scan(events, ofd_evt)
+    payload_scan_hub = extract_hub_from_scanned_at_payload(payload)
     fail_evt = fail_events[0] if fail_events else None
     success_evt = success_events[0] if success_events else None
     latest_route = latest_route_assignment(events)
@@ -1074,16 +1075,9 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
             seen_drivers.add(driver_name.lower())
             drivers.append(driver_name)
 
-    payload_contractor = str(structured_identity.get("Contractor") or "").strip()
-    if payload_contractor and payload_contractor.lower() not in seen_contractors:
-        contractors.append(payload_contractor)
-    payload_driver = str(structured_identity.get("Driver") or "").strip()
-    if payload_driver and payload_driver.lower() not in seen_drivers:
-        drivers.append(payload_driver)
-
     row: dict[str, str] = {
         "tracking_id": tracking_id,
-        "Hub": str(warehouse_hub or structured_identity.get("Hub") or scan_hub or "").strip(),
+        "Hub": str(warehouse_hub or scan_hub or payload_scan_hub or "").strip(),
         "Contractors": json.dumps(contractors, ensure_ascii=False),
         "Drivers": json.dumps(drivers, ensure_ascii=False),
         "Route_names": json.dumps(route_names, ensure_ascii=False),
@@ -1204,26 +1198,11 @@ def extract_route_identity_from_payload(payload: dict[str, Any]) -> dict[str, st
         *(_find_values_by_key(payload, "listRouteName", limit=2)),
         *(_find_values_by_key(payload, "route", limit=2)),
     )
-    assignee_name = _first_non_empty(
-        *(_find_values_by_key(payload, "assigneeName", limit=2)),
-        *(_find_values_by_key(payload, "driverName", limit=2)),
-        *(_find_values_by_key(payload, "name", limit=2)),
-    )
-    warehouse_name = _first_non_empty(
-        *(_find_values_by_key(payload, "warehouseName", limit=2)),
-        *(_find_values_by_key(payload, "warehouse", limit=2)),
-        *(_find_values_by_key(payload, "hub", limit=2)),
-    )
-    company_name = _first_non_empty(
-        *(_find_values_by_key(payload, "companyName", limit=2)),
-        *(_find_values_by_key(payload, "thirdPartyCompanyName", limit=2)),
-        *(_find_values_by_key(payload, "contractor", limit=2)),
-    )
 
     fallback = parse_route_identity(route_name, fallback_state="") if route_name else {"Hub": "", "Contractor": "", "Driver": "", "Route_type": ""}
-    hub = normalize_hub_name(warehouse_name or fallback.get("Hub", ""))
-    contractor = company_name or fallback.get("Contractor", "")
-    driver = assignee_name or fallback.get("Driver", "")
+    hub = normalize_hub_name(fallback.get("Hub", ""))
+    contractor = fallback.get("Contractor", "")
+    driver = fallback.get("Driver", "")
     route_type = "pickup" if (hub == "PU") else (fallback.get("Route_type", "delivery") or "delivery")
 
     return {
@@ -1236,6 +1215,26 @@ def extract_route_identity_from_payload(payload: dict[str, Any]) -> dict[str, st
         "Contractors": contractor,
         "Route_type": route_type,
     }
+
+
+def extract_hub_from_scanned_at_payload(payload: Any) -> str:
+    scanned_candidates = [
+        *(_find_values_by_key(payload, "scanned_at", limit=5)),
+        *(_find_values_by_key(payload, "scannedAt", limit=5)),
+        *(_find_values_by_key(payload, "scannedAtHub", limit=5)),
+        *(_find_values_by_key(payload, "scanAt", limit=5)),
+    ]
+
+    for candidate in scanned_candidates:
+        candidate_text = str(candidate or "").strip()
+        if not candidate_text:
+            continue
+        extracted_from_desc = extract_hub_from_scan_description(candidate_text)
+        normalized_hub = normalize_hub_name(extracted_from_desc or candidate_text)
+        if normalized_hub:
+            return normalized_hub
+
+    return ""
 
 
 def empty_row(tracking_id: str) -> dict[str, str]:
