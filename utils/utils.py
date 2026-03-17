@@ -121,6 +121,7 @@ def calculate_package_evaluation_weight(df: pd.DataFrame) -> pd.Series:
         return pd.Series(dtype="float64")
 
     weight_columns = [
+        "Weight",
         "evaluation_weight",
         "package_evaluation_weight",
         "package_weight",

@@ -940,8 +940,10 @@ def _upsert_kpi_metric_and_chart(
 def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
     chart_df = result_df.copy()
     chart_df["_created_date"] = to_datetime_series(chart_df, "created_time").dt.date
-    chart_df["_delivered_date"] = to_datetime_series(chart_df, "delivered_time").dt.date
-    chart_df["_evaluation_weight"] = calculate_package_evaluation_weight(chart_df)
+    chart_df["_weight"] = pd.to_numeric(chart_df.get("Weight", ""), errors="coerce")
+    chart_df["_evaluation_weight"] = chart_df["_weight"]
+    if chart_df["_evaluation_weight"].notna().sum() == 0:
+        chart_df["_evaluation_weight"] = calculate_package_evaluation_weight(chart_df)
 
     created_count_df = (
         chart_df[chart_df["_created_date"].notna()]
@@ -951,22 +953,50 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         .reset_index()
         .sort_values("_created_date")
     )
-    delivered_count_df = (
-        chart_df[chart_df["_delivered_date"].notna()]
-        .groupby("_delivered_date")
-        .size()
-        .rename("Package Count")
-        .reset_index()
-        .sort_values("_delivered_date")
-    )
     evaluation_weight_df = (
         chart_df[chart_df["_created_date"].notna()]
         .groupby("_created_date")["_evaluation_weight"]
-        .sum()
+        .mean()
         .rename("Evaluation Weight")
         .reset_index()
         .sort_values("_created_date")
     )
+
+    weight_bins = [0, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
+    weight_labels = [
+        "1-30",
+        "31-40",
+        "41-50",
+        "51-60",
+        "61-70",
+        "71-80",
+        "81-90",
+        "91-100",
+        "101-110",
+        "111-120",
+        "121-130",
+        "131-140",
+        "141-150",
+    ]
+    valid_weight_df = chart_df[chart_df["_weight"].notna() & (chart_df["_weight"] >= 1) & (chart_df["_weight"] <= 150)].copy()
+    if not valid_weight_df.empty:
+        valid_weight_df["_weight_bucket"] = pd.cut(
+            valid_weight_df["_weight"],
+            bins=weight_bins,
+            labels=weight_labels,
+            include_lowest=True,
+        )
+        weight_bucket_df = (
+            valid_weight_df.groupby("_weight_bucket", observed=False)
+            .size()
+            .reindex(weight_labels, fill_value=0)
+            .rename("Package Count")
+            .reset_index()
+            .rename(columns={"_weight_bucket": "Weight Bucket"})
+        )
+        weight_bucket_df = weight_bucket_df[weight_bucket_df["Package Count"] > 0]
+    else:
+        weight_bucket_df = pd.DataFrame(columns=["Weight Bucket", "Package Count"])
 
     c1, c2 = st.columns(2)
     with c1:
@@ -977,11 +1007,11 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
             st.line_chart(created_count_df.set_index("_created_date")["Package Count"])
 
     with c2:
-        st.markdown(f"#### {tr('daily_delivered_chart')}")
-        if delivered_count_df.empty:
+        st.markdown(f"#### {tr('weight_bucket_chart')}")
+        if weight_bucket_df.empty:
             st.info(tr("kpi_empty"))
         else:
-            st.line_chart(delivered_count_df.set_index("_delivered_date")["Package Count"])
+            st.bar_chart(weight_bucket_df.set_index("Weight Bucket")["Package Count"])
 
     st.markdown(f"#### {tr('daily_eval_weight_chart')}")
     if evaluation_weight_df.empty:

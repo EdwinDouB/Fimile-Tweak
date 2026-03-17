@@ -1071,6 +1071,7 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
         "Contractors": json.dumps(contractors, ensure_ascii=False),
         "Drivers": json.dumps(drivers, ensure_ascii=False),
         "Route_names": json.dumps(route_names, ensure_ascii=False),
+        "Weight": _extract_weight_from_payload(payload),
         "router_messages": raw_router_messages,
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
@@ -1129,6 +1130,56 @@ def _first_non_empty(*values: Any) -> str:
         if text:
             return text
     return ""
+
+
+def _extract_weight_from_payload(payload: Any) -> str:
+    weights: list[float] = []
+
+    def _parse_numeric(raw_value: Any) -> float | None:
+        text = str(raw_value or "").strip()
+        if not text:
+            return None
+        match = re.search(r"-?\d+(?:\.\d+)?", text)
+        if not match:
+            return None
+        try:
+            return float(match.group(0))
+        except ValueError:
+            return None
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            dims = node.get("dims")
+            if isinstance(dims, list):
+                for dim in dims:
+                    if not isinstance(dim, dict):
+                        continue
+                    dim_type = str(dim.get("t") or "").strip().upper()
+                    dim_value = dim.get("v")
+                    if dim_type == "WEIGHT":
+                        parsed = _parse_numeric(dim_value)
+                        if parsed is not None:
+                            weights.append(parsed)
+                    elif isinstance(dim_value, str) and dim_value.lower().startswith("pw:"):
+                        parsed = _parse_numeric(dim_value.split(":", 1)[-1])
+                        if parsed is not None:
+                            weights.append(parsed)
+
+            for value in node.values():
+                _walk(value)
+            return
+
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
+    if not weights:
+        return ""
+    value = weights[0]
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.2f}".rstrip("0").rstrip(".")
 
 
 def extract_route_identity_from_payload(payload: dict[str, Any]) -> dict[str, str]:
