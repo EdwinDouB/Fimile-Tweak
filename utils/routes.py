@@ -1401,22 +1401,15 @@ def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime
             "immature_mask": pd.Series(False, index=df.index),
         }
 
-    time_window_end = scanned_base["last_scanned_dt"] + pd.Timedelta(hours=120)
-    has_event_within_120h = (
-        (scanned_base["ofd_dt"].notna() & (scanned_base["ofd_dt"] > scanned_base["last_scanned_dt"]) & (scanned_base["ofd_dt"] <= time_window_end))
-        | (
-            scanned_base["attempted_dt"].notna()
-            & (scanned_base["attempted_dt"] > scanned_base["last_scanned_dt"])
-            & (scanned_base["attempted_dt"] <= time_window_end)
-        )
-        | (
-            scanned_base["delivered_dt"].notna()
-            & (scanned_base["delivered_dt"] > scanned_base["last_scanned_dt"])
-            & (scanned_base["delivered_dt"] <= time_window_end)
-        )
+    # Warehouse-lost should only include packages that never reached downstream
+    # delivery flow (OFD/attempted/delivered). Using "events after last scan"
+    # can over-count because last_scanned_dt is often already the latest event.
+    has_downstream_event = (
+        scanned_base["ofd_dt"].notna()
+        | scanned_base["attempted_dt"].notna()
+        | scanned_base["delivered_dt"].notna()
     )
-
-    candidate_mask_base = ~has_event_within_120h
+    candidate_mask_base = ~has_downstream_event
 
     if fetch_reference_time is None:
         fetch_reference_time_utc = datetime.now(timezone.utc)
