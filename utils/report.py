@@ -1150,14 +1150,20 @@ def kpi_report_to_excel_bytes(
                     _resolve_weight_distribution(hub_df),
                     chart_anchor_col=max(len(hub_table.columns) + 2, 16),
                 )
-                hub_next_row = _write_weight_distribution_section(
-                    hub_ws,
-                    workbook,
-                    hub_next_row,
-                    "每个Contractor的重量段（这一页表格每一行为维度）",
-                    _resolve_weight_distribution(hub_df, "Contractor"),
-                    chart_anchor_col=max(len(hub_table.columns) + 2, 16),
-                )
+                contractor_weight_df = _resolve_weight_distribution(hub_df, "Contractor")
+                if not contractor_weight_df.empty:
+                    contractor_title = "每个Contractor的重量段（每个Contractor单独一张表和图）"
+                    for _, contractor_row in contractor_weight_df.iterrows():
+                        contractor_name = str(contractor_row.get("维度", "Unknown Contractor"))
+                        single_contractor_df = pd.DataFrame([contractor_row])
+                        hub_next_row = _write_weight_distribution_section(
+                            hub_ws,
+                            workbook,
+                            hub_next_row,
+                            f"{contractor_title} - {contractor_name}",
+                            single_contractor_df,
+                            chart_anchor_col=max(len(hub_table.columns) + 2, 16),
+                        )
                 _insert_dashboard_charts(
                     hub_ws,
                     workbook,
