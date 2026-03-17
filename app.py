@@ -1891,6 +1891,7 @@ def main() -> None:
             mime="text/csv",
         )
         report_detail_df = build_detailed_report_detail_df(export_base_df) if layout_mode == "detailed" else export_df
+        report_filename = f"kpi_report_{layout_mode}_{stamp}.xlsx"
         try:
             kpi_report_data = kpi_report_to_excel_bytes(
                 report_payload,
@@ -1901,9 +1902,18 @@ def main() -> None:
             c_report.download_button(
                 tr("download_report"),
                 data=kpi_report_data,
-                file_name=f"kpi_report_{layout_mode}_{stamp}.xlsx",
+                file_name=report_filename,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
+        except ModuleNotFoundError:
+            fallback_csv = report_detail_df.to_csv(index=False).encode("utf-8-sig")
+            c_report.download_button(
+                f"{tr('download_report')}（CSV基础版）",
+                data=fallback_csv,
+                file_name=f"kpi_report_{layout_mode}_{stamp}.csv",
+                mime="text/csv",
+            )
+            c_report.info(tr("report_dep_missing"))
         except Exception:
             c_report.warning(tr("report_dep_missing"))
 
