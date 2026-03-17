@@ -1375,6 +1375,21 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 
 def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
+    df = df.copy()
+    datetime_fallback_columns = {
+        "last_scanned_dt": "last_scanned_time",
+        "ofd_dt": "out_for_delivery_time",
+        "attempted_dt": "attempted_time",
+        "delivered_dt": "delivered_time",
+    }
+    for dt_col, raw_col in datetime_fallback_columns.items():
+        if dt_col in df.columns:
+            continue
+        if raw_col in df.columns:
+            df[dt_col] = to_datetime_series(df, raw_col)
+        else:
+            df[dt_col] = pd.NaT
+
     base_mask = df["last_scanned_dt"].notna()
     scanned_base = df[base_mask].copy()
     if scanned_base.empty:
