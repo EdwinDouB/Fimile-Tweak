@@ -1,4 +1,3 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 import ast
 import json
@@ -1504,31 +1503,29 @@ def process_tracking_ids(
             row["router_messages"] = _serialize_router_messages(router_messages_map.get(tracking_id))
             return tracking_id, row, {"tracking_id": tracking_id, "reason": str(e)}
 
-    max_workers = min(API_MAX_WORKERS, total)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_tid = {executor.submit(worker, tracking_id): tracking_id for tracking_id in dedup_ids}
+    update_stride = max(1, total // 200)
+    for tracking_id in dedup_ids:
+        tracking_id, row, failure = worker(tracking_id)
+        state = str(receive_province_map.get(tracking_id) or "").strip()
+        row["State"] = normalize_state(state)
+        row["Region"] = infer_region_from_state(state)
+        sender_info = sender_info_map.get(tracking_id, {})
+        row["sender_company"] = str(sender_info.get("sender_company") or "").strip()
+        row["sender_province"] = str(sender_info.get("sender_province") or "").strip()
+        row["sender_city"] = str(sender_info.get("sender_city") or "").strip()
+        row["sender_address"] = str(sender_info.get("sender_address") or "").strip()
+        rows_by_id[tracking_id] = row
 
-        for future in as_completed(future_to_tid):
-            tracking_id, row, failure = future.result()
-            state = str(receive_province_map.get(tracking_id) or "").strip()
-            row["State"] = normalize_state(state)
-            row["Region"] = infer_region_from_state(state)
-            sender_info = sender_info_map.get(tracking_id, {})
-            row["sender_company"] = str(sender_info.get("sender_company") or "").strip()
-            row["sender_province"] = str(sender_info.get("sender_province") or "").strip()
-            row["sender_city"] = str(sender_info.get("sender_city") or "").strip()
-            row["sender_address"] = str(sender_info.get("sender_address") or "").strip()
-            rows_by_id[tracking_id] = row
+        if failure:
+            failures.append(failure)
 
-            if failure:
-                failures.append(failure)
-
-            completed += 1
+        completed += 1
+        if completed % update_stride == 0 or completed == total:
             progress_value = progress_start + (progress_end - progress_start) * (completed / total)
             progress_bar.progress(progress_value)
             status_text.text(tr("processing", completed=completed, total=total, tracking_id=tracking_id))
 
-    ordered_rows = [rows_by_id[tid] for tid in dedup_ids]
+    ordered_rows = [rows_by_id.get(tid, empty_row(tid)) for tid in dedup_ids]
     return pd.DataFrame(ordered_rows, columns=result_columns), failures
 
 def main() -> None:
@@ -1560,12 +1557,8 @@ def main() -> None:
         st.session_state["fetch_clicked_at"] = None
     if "report_filter_start_date" not in st.session_state:
         st.session_state["report_filter_start_date"] = None
-    if "report_filter_start_time" not in st.session_state:
-        st.session_state["report_filter_start_time"] = datetime.strptime("00:00", "%H:%M").time()
     if "report_filter_end_date" not in st.session_state:
         st.session_state["report_filter_end_date"] = None
-    if "report_filter_end_time" not in st.session_state:
-        st.session_state["report_filter_end_time"] = datetime.strptime("23:59", "%H:%M").time()
     if "exclude_atl_wdr" not in st.session_state:
         st.session_state["exclude_atl_wdr"] = True
     if "language" not in st.session_state:
@@ -1628,10 +1621,8 @@ def main() -> None:
     timestamp_cols = st.columns(2)
     with timestamp_cols[0]:
         st.date_input("起始时间 - 日期", key="report_filter_start_date", value=None)
-        st.time_input("起始时间 - 时间", key="report_filter_start_time")
     with timestamp_cols[1]:
         st.date_input("截止时间 - 日期", key="report_filter_end_date", value=None)
-        st.time_input("截止时间 - 时间", key="report_filter_end_time")
 
     st.toggle("是否去除 WDR 和 ATL（默认开启）", key="exclude_atl_wdr", value=True)
 
@@ -1669,18 +1660,14 @@ def main() -> None:
             status.text(message)
 
         try:
-            receive_province_map = fetch_receive_province_map(tuple(dedup_ids))
+            receive_province_map, sender_info_map = fetch_waybill_profile_map(tuple(dedup_ids))
         except Exception as e:
             st.warning(tr("state_region_fail", error=e))
-        finally:
-            update_setup_progress("Loading recipient location data...")
-
-        try:
-            sender_info_map = fetch_sender_info_map(tuple(dedup_ids))
-        except Exception:
+            receive_province_map = {}
             sender_info_map = {}
         finally:
-            update_setup_progress("Loading sender profile data...")
+            update_setup_progress("Loading recipient + sender profile data...")
+            update_setup_progress("Preparing profile payload...")
 
         try:
             fetch_router_messages = getattr(db, "fetch_router_messages_map", None)
@@ -1783,12 +1770,12 @@ def main() -> None:
         if st.session_state.get("report_filter_start_date") is not None:
             report_start_dt = datetime.combine(
                 st.session_state["report_filter_start_date"],
-                st.session_state.get("report_filter_start_time"),
+                datetime.min.time(),
             )
         if st.session_state.get("report_filter_end_date") is not None:
             report_end_dt = datetime.combine(
                 st.session_state["report_filter_end_date"],
-                st.session_state.get("report_filter_end_time"),
+                datetime.max.time(),
             )
 
         excluded_hub_df = pd.DataFrame()
