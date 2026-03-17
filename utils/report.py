@@ -173,7 +173,7 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame, source_df: pd.DataFr
     if detail_df is None or detail_df.empty:
         return pd.DataFrame(columns=[
             "Dimension", "Sample Count", "<24h Hit", "<24h Delivery Rate", "<48h Hit", "<48h Delivery Rate", "<72h Hit", "<72h Delivery Rate",
-            "<12h Scan Rate", "<24h Scan Rate", "<48h Scan Rate", "<72h Scan Rate", "POD Qualified Rate", "24h Attempt Rate", "DSP Lost Rate", "Warehouse Lost Rate", "Intercept Success Rate", "Monthly Lost Rate",
+            "<12h Scan Rate", "<24h Scan Rate", "<48h Scan Rate", "<72h Scan Rate", "POD Qualified Rate", "24h Attempt Rate", "DSP Lost Rate", "Warehouse Lost Rate", "Lost Rate", "Intercept Success Rate",
         ])
 
     source_attempt_df = detail_df.copy()
@@ -216,12 +216,12 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame, source_df: pd.DataFr
         row["<24h Scan Rate"] = _metric_rate(metric_map, "<24h scan rate")
         row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
         row["<72h Scan Rate"] = _metric_rate(metric_map, "<72h scan rate")
-        row["POD Qualified Rate"] = _first_available_metric_rate(metric_map, ["POD qualified rate", "Manual POD qualified rate"]) or pod_rate_from_data
-        row["24h Attempt Rate"] = _metric_rate(metric_map, "24h attempt rate")
-        row["DSP Lost Rate"] = 1 - _metric_rate(metric_map, "DSP lost rate")
-        row["Warehouse Lost Rate"] = 1 - _metric_rate(metric_map, "Warehouse lost rate")
-        row["Intercept Success Rate"] = _metric_rate(metric_map, "Intercept success rate")
-        row["Monthly Lost Rate"] = 1 - _metric_rate(metric_map, "lost rate")
+        row["POD Qualified Rate"] = _safe_rate_value(_first_available_metric_rate(metric_map, ["POD qualified rate", "Manual POD qualified rate"]) or pod_rate_from_data)
+        row["24h Attempt Rate"] = _safe_rate_value(_metric_rate(metric_map, "24h attempt rate"))
+        row["DSP Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "DSP lost rate"))
+        row["Warehouse Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "Warehouse lost rate"))
+        row["Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "lost rate"))
+        row["Intercept Success Rate"] = _safe_rate_value(_metric_rate(metric_map, "Intercept success rate"))
         rows.append(row)
 
     rows: list[dict[str, Any]] = []
@@ -301,12 +301,12 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str, source_df: pd.DataF
         row["<24h Scan Rate"] = _metric_rate(metric_map, "<24h scan rate")
         row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
         row["<72h Scan Rate"] = _metric_rate(metric_map, "<72h scan rate")
-        row["POD Qualified Rate"] = _first_available_metric_rate(metric_map, ["POD qualified rate", "Manual POD qualified rate"]) or pod_rate_from_data
-        row["24h Attempt Rate"] = _metric_rate(metric_map, "24h attempt rate")
-        row["DSP Lost Rate"] = 1 - _metric_rate(metric_map, "DSP lost rate")
-        row["Warehouse Lost Rate"] = 1 - _metric_rate(metric_map, "Warehouse lost rate")
-        row["Intercept Success Rate"] = _metric_rate(metric_map, "Intercept success rate")
-        row["Monthly Lost Rate"] = 1 - _metric_rate(metric_map, "lost rate")
+        row["POD Qualified Rate"] = _safe_rate_value(_first_available_metric_rate(metric_map, ["POD qualified rate", "Manual POD qualified rate"]) or pod_rate_from_data)
+        row["24h Attempt Rate"] = _safe_rate_value(_metric_rate(metric_map, "24h attempt rate"))
+        row["DSP Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "DSP lost rate"))
+        row["Warehouse Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "Warehouse lost rate"))
+        row["Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "lost rate"))
+        row["Intercept Success Rate"] = _safe_rate_value(_metric_rate(metric_map, "Intercept success rate"))
         rows.append(row)
 
     _append_row(hub_name, hub_df)
@@ -360,7 +360,8 @@ def _metric_rate(metric_map: dict[str, dict[str, Any]], metric_name: str) -> flo
     direct_rate = metric.get("rate", 0.0)
     if total:
         return rate(hit, total)
-    return float(direct_rate or 0.0)
+    value = float(direct_rate or 0.0)
+    return 0.0 if pd.isna(value) else value
 
 
 def _first_available_metric_rate(metric_map: dict[str, dict[str, Any]], metric_names: list[str]) -> float:
@@ -368,6 +369,14 @@ def _first_available_metric_rate(metric_map: dict[str, dict[str, Any]], metric_n
         if metric_name in metric_map:
             return _metric_rate(metric_map, metric_name)
     return 0.0
+
+
+def _safe_rate_value(value: Any) -> float:
+    try:
+        result = float(value)
+    except Exception:
+        return 0.0
+    return 0.0 if pd.isna(result) else result
 
 
 def _insert_dashboard_charts(
@@ -974,7 +983,6 @@ def kpi_report_to_excel_bytes(
                 ].astype(str)
             ) if (not attempt_level_source_df.empty and "tracking_id" in attempt_level_source_df.columns) else set()
             dsp_lost_mask = source_df["tracking_id"].astype(str).isin(dsp_lost_tracking_ids) if "tracking_id" in source_df.columns else pd.Series(False, index=source_df.index)
-            lost_mask = warehouse_lost_mask.reindex(source_df.index, fill_value=False) | dsp_lost_mask.reindex(source_df.index, fill_value=False)
             lost_detail_columns = [
                 "tracking_id",
                 "Region",
@@ -990,8 +998,22 @@ def kpi_report_to_excel_bytes(
                 "out_for_delivery_time",
                 "attempted_time",
                 "delivered_time",
+                "lost_source",
             ]
-            lost_detail_df = source_df.loc[lost_mask].copy() if len(lost_mask) == len(source_df) else pd.DataFrame(columns=lost_detail_columns)
+
+            warehouse_rows = source_df.loc[warehouse_lost_mask.reindex(source_df.index, fill_value=False)].copy() if len(warehouse_lost_mask) == len(source_df) else pd.DataFrame()
+            if not warehouse_rows.empty:
+                warehouse_rows["lost_source"] = "warehouse_lost_numerator"
+
+            dsp_rows = source_df.loc[dsp_lost_mask.reindex(source_df.index, fill_value=False)].copy() if len(dsp_lost_mask) == len(source_df) else pd.DataFrame()
+            if not dsp_rows.empty:
+                dsp_rows["lost_source"] = "dsp_lost_numerator"
+
+            if not warehouse_rows.empty or not dsp_rows.empty:
+                lost_detail_df = pd.concat([warehouse_rows, dsp_rows], ignore_index=True)
+            else:
+                lost_detail_df = pd.DataFrame(columns=lost_detail_columns)
+
             for column in lost_detail_columns:
                 if column not in lost_detail_df.columns:
                     lost_detail_df[column] = pd.NA
