@@ -210,16 +210,16 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame) -> pd.DataFrame:
         if "POD是否合格" in sub_df.columns and len(sub_df) > 0:
             pod_hit = int(sub_df["POD是否合格"].fillna("").astype(str).str.strip().eq("是").sum())
             pod_rate_from_data = rate(pod_hit, len(sub_df))
-        row["<12h Scan Rate"] = metric_map.get("<12h scan rate", {}).get("rate", 0.0)
-        row["<24h Scan Rate"] = metric_map.get("<24h scan rate", {}).get("rate", 0.0)
-        row["<48h Scan Rate"] = metric_map.get("<48h scan rate", {}).get("rate", 0.0)
-        row["<72h Scan Rate"] = metric_map.get("<72h scan rate", {}).get("rate", 0.0)
-        row["POD Qualified Rate"] = metric_map.get("POD qualified rate", {}).get("rate", pod_rate_from_data or metric_map.get("Manual POD qualified rate", {}).get("rate", 0.0))
-        row["24h Attempt Rate"] = metric_map.get("24h attempt rate", {}).get("rate", 0.0)
-        row["DSP Lost Rate"] = metric_map.get("DSP lost rate", {}).get("rate", 0.0)
-        row["Warehouse Lost Rate"] = metric_map.get("Warehouse lost rate", {}).get("rate", 0.0)
-        row["Intercept Success Rate"] = metric_map.get("Intercept success rate", {}).get("rate", 0.0)
-        row["Monthly Lost Rate"] = metric_map.get("lost rate", {}).get("rate", 0.0)
+        row["<12h Scan Rate"] = _metric_rate(metric_map, "<12h scan rate")
+        row["<24h Scan Rate"] = _metric_rate(metric_map, "<24h scan rate")
+        row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
+        row["<72h Scan Rate"] = _metric_rate(metric_map, "<72h scan rate")
+        row["POD Qualified Rate"] = _metric_rate(metric_map, "POD qualified rate") or pod_rate_from_data or _metric_rate(metric_map, "Manual POD qualified rate")
+        row["24h Attempt Rate"] = _metric_rate(metric_map, "24h attempt rate")
+        row["DSP Lost Rate"] = _metric_rate(metric_map, "DSP lost rate")
+        row["Warehouse Lost Rate"] = _metric_rate(metric_map, "Warehouse lost rate")
+        row["Intercept Success Rate"] = _metric_rate(metric_map, "Intercept success rate")
+        row["Monthly Lost Rate"] = _metric_rate(metric_map, "lost rate")
         rows.append(row)
 
     rows: list[dict[str, Any]] = []
@@ -277,16 +277,16 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str) -> pd.DataFrame:
         if "POD是否合格" in sub_df.columns and len(sub_df) > 0:
             pod_hit = int(sub_df["POD是否合格"].fillna("").astype(str).str.strip().eq("是").sum())
             pod_rate_from_data = rate(pod_hit, len(sub_df))
-        row["<12h Scan Rate"] = metric_map.get("<12h scan rate", {}).get("rate", 0.0)
-        row["<24h Scan Rate"] = metric_map.get("<24h scan rate", {}).get("rate", 0.0)
-        row["<48h Scan Rate"] = metric_map.get("<48h scan rate", {}).get("rate", 0.0)
-        row["<72h Scan Rate"] = metric_map.get("<72h scan rate", {}).get("rate", 0.0)
-        row["POD Qualified Rate"] = metric_map.get("POD qualified rate", {}).get("rate", pod_rate_from_data or metric_map.get("Manual POD qualified rate", {}).get("rate", 0.0))
-        row["24h Attempt Rate"] = metric_map.get("24h attempt rate", {}).get("rate", 0.0)
-        row["DSP Lost Rate"] = metric_map.get("DSP lost rate", {}).get("rate", 0.0)
-        row["Warehouse Lost Rate"] = metric_map.get("Warehouse lost rate", {}).get("rate", 0.0)
-        row["Intercept Success Rate"] = metric_map.get("Intercept success rate", {}).get("rate", 0.0)
-        row["Monthly Lost Rate"] = metric_map.get("lost rate", {}).get("rate", 0.0)
+        row["<12h Scan Rate"] = _metric_rate(metric_map, "<12h scan rate")
+        row["<24h Scan Rate"] = _metric_rate(metric_map, "<24h scan rate")
+        row["<48h Scan Rate"] = _metric_rate(metric_map, "<48h scan rate")
+        row["<72h Scan Rate"] = _metric_rate(metric_map, "<72h scan rate")
+        row["POD Qualified Rate"] = _metric_rate(metric_map, "POD qualified rate") or pod_rate_from_data or _metric_rate(metric_map, "Manual POD qualified rate")
+        row["24h Attempt Rate"] = _metric_rate(metric_map, "24h attempt rate")
+        row["DSP Lost Rate"] = _metric_rate(metric_map, "DSP lost rate")
+        row["Warehouse Lost Rate"] = _metric_rate(metric_map, "Warehouse lost rate")
+        row["Intercept Success Rate"] = _metric_rate(metric_map, "Intercept success rate")
+        row["Monthly Lost Rate"] = _metric_rate(metric_map, "lost rate")
         rows.append(row)
 
     _append_row(hub_name, hub_df)
@@ -331,6 +331,18 @@ def _sanitize_sheet_name(name: str) -> str:
     return cleaned[:31]
 
 
+def _metric_rate(metric_map: dict[str, dict[str, Any]], metric_name: str) -> float:
+    metric = metric_map.get(metric_name, {})
+    if not isinstance(metric, dict):
+        return 0.0
+    hit = metric.get("hit", 0)
+    total = metric.get("total", 0)
+    direct_rate = metric.get("rate", 0.0)
+    if total:
+        return rate(hit, total)
+    return float(direct_rate or 0.0)
+
+
 def _insert_dashboard_charts(
     worksheet,
     workbook,
@@ -367,14 +379,14 @@ def _insert_dashboard_charts(
         "<48h delivery rate": (chart_row, chart_col + 8),
         "<72h delivery rate": (chart_row, chart_col + 16),
         "12/24/48/72 scan rate": (chart_row + 16, chart_col),
-        "POD qualified rate": (chart_row + 32, chart_col),
-        "24h attempt rate": (chart_row + 32, chart_col + 8),
-        "lost rate": (chart_row + 32, chart_col + 16),
-        "DSP lost rate": (chart_row + 48, chart_col),
-        "Warehouse lost rate": (chart_row + 48, chart_col + 8),
+        "24h attempt rate": (chart_row + 16, chart_col + 8),
+        "POD qualified rate": (chart_row + 16, chart_col + 16),
+        "lost rate": (chart_row + 32, chart_col),
+        "DSP lost rate": (chart_row + 32, chart_col + 8),
+        "Warehouse lost rate": (chart_row + 32, chart_col + 16),
     }
 
-    for chart_name in ["<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "POD qualified rate", "24h attempt rate", "lost rate", "DSP lost rate", "Warehouse lost rate"]:
+    for chart_name in ["<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "24h attempt rate", "POD qualified rate", "lost rate", "DSP lost rate", "Warehouse lost rate"]:
         group = chart_df[chart_df["chart"] == chart_name]
         if group.empty:
             continue
@@ -687,30 +699,118 @@ def build_kpi_report_payload(
             },
         ]
     )
-    
-    lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
-    scanned_base = lost_analysis["scanned_base"]
-    scanned_base["lost"] = lost_analysis["lost_mask"].loc[scanned_base.index].astype(int)
-    monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("tracking_id", "count"), lost=("lost", "sum"))
-    lost_total = int(monthly_lost["lost"].sum()) if not monthly_lost.empty else 0
-    scanned_total = int(monthly_lost["total"].sum()) if not monthly_lost.empty else 0
+
+    dsp_lost_hit = int((attempt_base["attempt_result"] == "lost").sum()) if not attempt_base.empty else 0
+    dsp_lost_total = attempt_total_count
     metrics.append(
         {
-            "category": "monthly_lost_rate_last_scan_120h",
-            "metric": "lost rate",
-            "hit": lost_total,
-            "total": scanned_total,
-            "rate": rate(lost_total, scanned_total),
+            "category": "dsp_assessment",
+            "metric": "DSP lost rate",
+            "hit": dsp_lost_hit,
+            "total": dsp_lost_total,
+            "rate": rate(dsp_lost_hit, dsp_lost_total),
         }
     )
     chart_rows.extend(
         [
-            {"chart": "lost rate", "category": "Lost", "count": lost_total, "rate": rate(lost_total, scanned_total)},
+            {
+                "chart": "DSP lost rate",
+                "category": "DSP lost",
+                "count": dsp_lost_hit,
+                "rate": rate(dsp_lost_hit, dsp_lost_total),
+            },
+            {
+                "chart": "DSP lost rate",
+                "category": "Not DSP lost",
+                "count": max(dsp_lost_total - dsp_lost_hit, 0),
+                "rate": rate(max(dsp_lost_total - dsp_lost_hit, 0), dsp_lost_total),
+            },
+        ]
+    )
+
+    canceled_count = 0
+    intercept_success_count = 0
+    for _, row in df.iterrows():
+        intervals = _load_intervals(row.get("Intervals"))
+        if not intervals:
+            continue
+        event_types = [str(event.get("type") or "").strip().lower() for event in intervals]
+        if "cancel" not in event_types:
+            continue
+        canceled_count += 1
+        cancel_index = event_types.index("cancel")
+        has_delivery_before_cancel = any(t in {"out-for-delivery", "ofd", "outfordelivery", "success", "delivered", "fail", "failed", "failure"} for t in event_types[: cancel_index + 1])
+        if not has_delivery_before_cancel:
+            intercept_success_count += 1
+
+    metrics.append(
+        {
+            "category": "hub_assessment",
+            "metric": "Intercept success rate",
+            "hit": intercept_success_count,
+            "total": canceled_count,
+            "rate": rate(intercept_success_count, canceled_count),
+        }
+    )
+
+    lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
+    scanned_base = lost_analysis["scanned_base"]
+    scanned_base["lost"] = lost_analysis["lost_mask"].loc[scanned_base.index].astype(int)
+    monthly_lost = scanned_base.groupby("month", as_index=False).agg(total=("tracking_id", "count"), lost=("lost", "sum"))
+
+    warehouse_lost_hit = int(scanned_base["lost"].sum()) if not scanned_base.empty else 0
+    warehouse_lost_total = len(scanned_base)
+    metrics.append(
+        {
+            "category": "hub_assessment",
+            "metric": "Warehouse lost rate",
+            "hit": warehouse_lost_hit,
+            "total": warehouse_lost_total,
+            "rate": rate(warehouse_lost_hit, warehouse_lost_total),
+        }
+    )
+    chart_rows.extend(
+        [
+            {
+                "chart": "Warehouse lost rate",
+                "category": "Warehouse lost",
+                "count": warehouse_lost_hit,
+                "rate": rate(warehouse_lost_hit, warehouse_lost_total),
+            },
+            {
+                "chart": "Warehouse lost rate",
+                "category": "Not warehouse lost",
+                "count": max(warehouse_lost_total - warehouse_lost_hit, 0),
+                "rate": rate(max(warehouse_lost_total - warehouse_lost_hit, 0), warehouse_lost_total),
+            },
+        ]
+    )
+
+    combined_lost_hit = dsp_lost_hit + warehouse_lost_hit
+    combined_lost_total = dsp_lost_total + warehouse_lost_total
+
+    metrics.append(
+        {
+            "category": "monthly_lost_rate_last_scan_120h",
+            "metric": "lost rate",
+            "hit": combined_lost_hit,
+            "total": combined_lost_total,
+            "rate": rate(combined_lost_hit, combined_lost_total),
+        }
+    )
+    chart_rows.extend(
+        [
+            {
+                "chart": "lost rate",
+                "category": "Lost",
+                "count": combined_lost_hit,
+                "rate": rate(combined_lost_hit, combined_lost_total),
+            },
             {
                 "chart": "lost rate",
                 "category": "Not lost",
-                "count": max(scanned_total - lost_total, 0),
-                "rate": rate(max(scanned_total - lost_total, 0), scanned_total),
+                "count": max(combined_lost_total - combined_lost_hit, 0),
+                "rate": rate(max(combined_lost_total - combined_lost_hit, 0), combined_lost_total),
             },
         ]
     )
@@ -850,6 +950,7 @@ def kpi_report_to_excel_bytes(
                 "created_time",
                 "first_scanned_time",
                 "last_scanned_time",
+                "first_out_for_delivery_date",
                 "out_for_delivery_time",
                 "attempted_time",
                 "delivered_time",

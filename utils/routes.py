@@ -1376,9 +1376,10 @@ def df_to_excel_bytes(df: pd.DataFrame) -> bytes:
 
 def build_lost_package_analysis(df: pd.DataFrame, fetch_reference_time: datetime | None = None) -> dict[str, Any]:
     df = df.copy()
+    ofd_raw_column = "first_out_for_delivery_date" if "first_out_for_delivery_date" in df.columns else "out_for_delivery_time"
     datetime_fallback_columns = {
         "last_scanned_dt": "last_scanned_time",
-        "ofd_dt": "out_for_delivery_time",
+        "ofd_dt": ofd_raw_column,
         "attempted_dt": "attempted_time",
         "delivered_dt": "delivered_time",
     }
