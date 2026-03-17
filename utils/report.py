@@ -6,11 +6,7 @@ import ast
 import json
 import pandas as pd
 import io 
-
-try:
-    from xlsxwriter.utility import xl_col_to_name
-except Exception:
-    xl_col_to_name = None
+from xlsxwriter.utility import xl_col_to_name
 
 
 def _resolve_ofd_column(df: pd.DataFrame) -> str:
@@ -733,9 +729,6 @@ def kpi_report_to_excel_bytes(
     layout_mode: str = "detailed",
     source_df: pd.DataFrame | None = None,
 ) -> bytes:
-    if xl_col_to_name is None:
-        raise ModuleNotFoundError("xlsxwriter is required for chart-based report export")
-
     output = io.BytesIO()
     metrics_df = pd.DataFrame(kpi_payload["metrics"])
     chart_df = pd.DataFrame(kpi_payload["charts"])
