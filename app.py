@@ -967,30 +967,11 @@ def render_daily_kpi_charts(result_df: pd.DataFrame) -> None:
         .sort_values("_created_date")
     )
 
-    weight_bins = [0, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150]
-    weight_labels = [
-        "1-30",
-        "31-40",
-        "41-50",
-        "51-60",
-        "61-70",
-        "71-80",
-        "81-90",
-        "91-100",
-        "101-110",
-        "111-120",
-        "121-130",
-        "131-140",
-        "141-150",
-    ]
-    valid_weight_df = chart_df[chart_df["_weight"].notna() & (chart_df["_weight"] >= 1) & (chart_df["_weight"] <= 150)].copy()
+    normalized_weight = report_utils._normalize_weight_to_unit(chart_df["_weight"])
+    valid_weight_df = chart_df[normalized_weight.notna() & (normalized_weight > 0)].copy()
     if not valid_weight_df.empty:
-        valid_weight_df["_weight_bucket"] = pd.cut(
-            valid_weight_df["_weight"],
-            bins=weight_bins,
-            labels=weight_labels,
-            include_lowest=True,
-        )
+        weight_labels = report_utils._weight_bucket_labels(valid_weight_df)
+        valid_weight_df["_weight_bucket"] = normalized_weight.loc[valid_weight_df.index].astype(int).astype(str)
         weight_bucket_df = (
             valid_weight_df.groupby("_weight_bucket", observed=False)
             .size()
@@ -1029,6 +1010,7 @@ def render_kpi_charts(
     layout_mode: str,
     fetch_reference_time: datetime | None = None,
     route_attempts_df: pd.DataFrame | None = None,
+    show_details: bool = False,
     report_start_dt: datetime | None = None,
     report_end_dt: datetime | None = None,
     exclude_atl_wdr: bool = True,
@@ -1188,11 +1170,23 @@ def render_kpi_charts(
         use_container_width=True,
         disabled=hub_scan_detail_df.empty,
     )
-    st.dataframe(hub_scan_detail_df, use_container_width=True, hide_index=True)
+    _render_optional_dataframe(
+        hub_scan_detail_df,
+        show_details,
+        "暂无 Hub 上网率明细。",
+        "已隐藏 Hub 上网率明细表格；如需查看请勾选“显示详细数据表”。",
+        hide_index=True,
+    )
 
     st.markdown(f"#### {tr('timeliness_quality_breakdown_title')}")
     timeliness_quality_df = build_timeliness_quality_breakdown_table(dsp_metric_scope_df, thresholds=[24, 48, 72])
-    st.dataframe(style_breakdown_rows(timeliness_quality_df), use_container_width=True, hide_index=True)
+    _render_optional_dataframe(
+        style_breakdown_rows(timeliness_quality_df),
+        show_details,
+        tr("kpi_empty"),
+        "已隐藏时效与质量明细表格；如需查看请勾选“显示详细数据表”。",
+        hide_index=True,
+    )
 
     attempt_detail_export_df = dsp_metric_scope_df.copy()
 
@@ -1205,7 +1199,12 @@ def render_kpi_charts(
         use_container_width=True,
         disabled=attempt_detail_export_df.empty,
     )
-    st.dataframe(attempt_detail_export_df, use_container_width=True)
+    _render_optional_dataframe(
+        attempt_detail_export_df,
+        show_details,
+        "暂无 Route 明细。",
+        "已隐藏 Route 明细表格；如需查看请勾选“显示详细数据表”。",
+    )
 
     if layout_mode == "compact":
         selected_eval_weight = calculate_package_evaluation_weight(result_df).sum()
@@ -1349,10 +1348,12 @@ def render_kpi_charts(
             chart_key=f"lost_{refresh_key}",
         )
         st.markdown(f"##### {tr('lost_detail')}")
-        if lost_detail_df.empty:
-            st.info(tr("lost_empty"))
-        else:
-            st.dataframe(lost_detail_df, use_container_width=True)
+        _render_optional_dataframe(
+            lost_detail_df,
+            show_details,
+            tr("lost_empty"),
+            "已隐藏丢包明细表格；如需查看请勾选“显示详细数据表”。",
+        )
     else:
         st.info(tr("lost_no_scan"))
 
@@ -1378,6 +1379,16 @@ def build_layout_specific_report_payload(kpi_payload: dict[str, Any], layout_mod
         "metrics": compact_metrics,
         "charts": compact_charts,
     }
+
+
+def _render_optional_dataframe(df: pd.DataFrame, show_details: bool, empty_message: str, hidden_message: str, *, use_container_width: bool = True, hide_index: bool = False) -> None:
+    if df.empty:
+        st.info(empty_message)
+        return
+    if show_details:
+        st.dataframe(df, use_container_width=use_container_width, hide_index=hide_index)
+        return
+    st.caption(hidden_message)
 
 
 def build_layout_specific_export_df(filtered_df: pd.DataFrame, layout_mode: str) -> pd.DataFrame:
@@ -1970,6 +1981,12 @@ def main() -> None:
             format_func=lambda x: tr("layout_mode_detailed") if x == "detailed" else tr("layout_mode_compact"),
             key="kpi_layout_mode",
         )
+        show_detailed_tables = st.checkbox(
+            "显示详细数据表（数据量大时建议关闭）",
+            value=False,
+            help="关闭后仅保留数据总览表格和下载按钮，以减少发送到浏览器的数据量。",
+            key="show_detailed_tables",
+        )
 
         route_attempts_df, unresolved_attempts_df, canceled_attempts_df, lost_attempts_df = build_route_attempts_view(filtered_df)
         if not excluded_hub_df.empty:
@@ -1980,6 +1997,7 @@ def main() -> None:
             layout_mode=layout_mode,
             fetch_reference_time=st.session_state.get("fetch_clicked_at"),
             route_attempts_df=route_attempts_df,
+            show_details=show_detailed_tables,
             report_start_dt=report_start_dt,
             report_end_dt=report_end_dt,
             exclude_atl_wdr=bool(st.session_state.get("exclude_atl_wdr", True)),
@@ -1992,9 +2010,19 @@ def main() -> None:
                 if excluded_hub_df.empty:
                     st.info("当前没有 ATL/WDR 数据。")
                 else:
-                    st.dataframe(excluded_hub_df, use_container_width=True)
+                    _render_optional_dataframe(
+                        excluded_hub_df,
+                        show_detailed_tables,
+                        "当前没有 ATL/WDR 数据。",
+                        "已隐藏 ATL/WDR 原始数据表格；如需查看请勾选“显示详细数据表”。",
+                    )
                     st.markdown("**ATL/WDR Route尝试明细**")
-                    st.dataframe(excluded_hub_route_attempts_df, use_container_width=True)
+                    _render_optional_dataframe(
+                        excluded_hub_route_attempts_df,
+                        show_detailed_tables,
+                        "当前没有 ATL/WDR Route 尝试明细。",
+                        "已隐藏 ATL/WDR Route 尝试明细表格；如需查看请勾选“显示详细数据表”。",
+                    )
 
         st.subheader(tr("result_preview"))
         display_df = build_tracking_display_df(
@@ -2007,14 +2035,24 @@ def main() -> None:
         if display_df.empty:
             st.info("No records under current filters.")
         else:
-            st.dataframe(display_df, use_container_width=True)
+            _render_optional_dataframe(
+                display_df,
+                show_detailed_tables,
+                "No records under current filters.",
+                "已隐藏结果预览表格；如需查看请勾选“显示详细数据表”。",
+            )
 
         st.subheader(tr("customer_summary_section"))
         customer_summary_df = build_customer_address_summary(filtered_df)
         if customer_summary_df.empty:
             st.info(tr("customer_summary_empty"))
         else:
-            st.dataframe(customer_summary_df, use_container_width=True)
+            _render_optional_dataframe(
+                customer_summary_df,
+                show_detailed_tables,
+                tr("customer_summary_empty"),
+                "已隐藏取货仓库表格；如需查看请勾选“显示详细数据表”。",
+            )
             st.download_button(
                 tr("download_customer_summary"),
                 data=customer_summary_df.to_csv(index=False).encode("utf-8-sig"),
@@ -2022,42 +2060,54 @@ def main() -> None:
                 mime="text/csv",
             )
         st.subheader(tr("route_attempts_section"))
-        if route_attempts_df.empty:
-            st.info(tr("route_attempts_empty"))
-        else:
-            st.dataframe(route_attempts_df, use_container_width=True)
+        _render_optional_dataframe(
+            route_attempts_df,
+            show_detailed_tables,
+            tr("route_attempts_empty"),
+            "已隐藏 Route 尝试明细表格；如需查看请勾选“显示详细数据表”。",
+        )
 
         multi_route_tracking_df = build_multi_route_tracking_view(route_attempts_df)
         st.subheader(tr("multi_route_tracking_section"))
-        if multi_route_tracking_df.empty:
-            st.info(tr("multi_route_tracking_empty"))
-        else:
-            st.dataframe(multi_route_tracking_df, use_container_width=True)
+        _render_optional_dataframe(
+            multi_route_tracking_df,
+            show_detailed_tables,
+            tr("multi_route_tracking_empty"),
+            "已隐藏多次 Route 单号表格；如需查看请勾选“显示详细数据表”。",
+        )
 
         st.subheader(tr("route_attempts_unresolved_section"))
-        if unresolved_attempts_df.empty:
-            st.info(tr("route_attempts_unresolved_empty"))
-        else:
-            st.dataframe(unresolved_attempts_df, use_container_width=True)
+        _render_optional_dataframe(
+            unresolved_attempts_df,
+            show_detailed_tables,
+            tr("route_attempts_unresolved_empty"),
+            "已隐藏未解析 Route 明细表格；如需查看请勾选“显示详细数据表”。",
+        )
 
         st.subheader(tr("route_attempts_canceled_section"))
-        if canceled_attempts_df.empty:
-            st.info(tr("route_attempts_canceled_empty"))
-        else:
-            st.dataframe(canceled_attempts_df, use_container_width=True)
+        _render_optional_dataframe(
+            canceled_attempts_df,
+            show_detailed_tables,
+            tr("route_attempts_canceled_empty"),
+            "已隐藏取消件明细表格；如需查看请勾选“显示详细数据表”。",
+        )
 
         st.subheader(tr("route_attempts_lost_section"))
-        if lost_attempts_df.empty:
-            st.info(tr("route_attempts_lost_empty"))
-        else:
-            st.dataframe(lost_attempts_df, use_container_width=True)
+        _render_optional_dataframe(
+            lost_attempts_df,
+            show_detailed_tables,
+            tr("route_attempts_lost_empty"),
+            "已隐藏丢件明细表格；如需查看请勾选“显示详细数据表”。",
+        )
 
         invalid_route_df = build_invalid_route_summary(filtered_df)
         st.subheader(tr("invalid_route_section"))
-        if invalid_route_df.empty:
-            st.info(tr("invalid_route_empty"))
-        else:
-            st.dataframe(invalid_route_df, use_container_width=True)
+        _render_optional_dataframe(
+            invalid_route_df,
+            show_detailed_tables,
+            tr("invalid_route_empty"),
+            "已隐藏异常 Route 汇总表格；如需查看请勾选“显示详细数据表”。",
+        )
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         export_base_df = filtered_df.copy()

@@ -4,6 +4,7 @@ from utils.routes import split_pickup_routes, build_lost_package_analysis
 from typing import Any
 import ast
 import json
+import math
 import pandas as pd
 import io 
 from xlsxwriter.utility import xl_col_to_name
@@ -492,27 +493,22 @@ def _insert_dashboard_charts(
     worksheet.set_column(data_col, data_col + 3, 14)
 
 
-def _weight_bucket_labels() -> list[str]:
-    return [
-        "1-30",
-        "31-40",
-        "41-50",
-        "51-60",
-        "61-70",
-        "71-80",
-        "81-90",
-        "91-100",
-        "101-110",
-        "111-120",
-        "121-130",
-        "131-140",
-        "141-150",
-        "150+",
-    ]
+def _normalize_weight_to_unit(weight_series: pd.Series) -> pd.Series:
+    numeric_weight = pd.to_numeric(weight_series, errors="coerce")
+    normalized_weight = numeric_weight.copy()
+    positive_mask = normalized_weight > 0
+    normalized_weight.loc[positive_mask] = normalized_weight.loc[positive_mask].apply(math.ceil)
+    return normalized_weight
 
 
-def _weight_bucket_bins() -> list[float]:
-    return [0, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, float("inf")]
+def _weight_bucket_labels(df: pd.DataFrame | None = None) -> list[str]:
+    weight_series = _resolve_weight_series(df) if isinstance(df, pd.DataFrame) else pd.Series(dtype="float64")
+    normalized_weight = _normalize_weight_to_unit(weight_series)
+    positive_weight = normalized_weight[normalized_weight.notna() & (normalized_weight > 0)]
+    if positive_weight.empty:
+        return []
+    max_weight = int(positive_weight.max())
+    return [str(weight) for weight in range(1, max_weight + 1)]
 
 
 def _resolve_weight_series(df: pd.DataFrame) -> pd.Series:
@@ -530,23 +526,21 @@ def _resolve_weight_distribution(df: pd.DataFrame, dimension_col: str | None = N
     if df is None or df.empty:
         return pd.DataFrame()
 
-    labels = _weight_bucket_labels()
+    labels = _weight_bucket_labels(df)
+    if not labels:
+        return pd.DataFrame()
+
     weight_series = _resolve_weight_series(df)
-    valid_df = df[weight_series.notna() & (weight_series > 0)].copy()
+    normalized_weight = _normalize_weight_to_unit(weight_series)
+    valid_df = df[normalized_weight.notna() & (normalized_weight > 0)].copy()
     if valid_df.empty:
         return pd.DataFrame()
 
-    valid_df["_resolved_weight"] = weight_series.loc[valid_df.index]
-    valid_df["_weight_bucket"] = pd.cut(
-        valid_df["_resolved_weight"],
-        bins=_weight_bucket_bins(),
-        labels=labels,
-        include_lowest=True,
-    )
+    valid_df["_resolved_weight_unit"] = normalized_weight.loc[valid_df.index].astype(int).astype(str)
 
     if dimension_col is None:
         counts = (
-            valid_df.groupby("_weight_bucket", observed=False)
+            valid_df.groupby("_resolved_weight_unit", observed=False)
             .size()
             .reindex(labels, fill_value=0)
             .astype(int)
@@ -559,7 +553,7 @@ def _resolve_weight_distribution(df: pd.DataFrame, dimension_col: str | None = N
     dimension_series = valid_df[dimension_col].fillna(f"Unknown {dimension_col}").astype(str).str.strip().replace("", f"Unknown {dimension_col}")
     grouped = (
         valid_df.assign(_dimension=dimension_series)
-        .groupby(["_dimension", "_weight_bucket"], observed=False)
+        .groupby(["_dimension", "_resolved_weight_unit"], observed=False)
         .size()
         .unstack(fill_value=0)
         .reindex(columns=labels, fill_value=0)
