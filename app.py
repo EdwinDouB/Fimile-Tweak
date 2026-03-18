@@ -71,12 +71,19 @@ def ensure_compatibility_columns(df: pd.DataFrame) -> pd.DataFrame:
         items = _parse_list_cell(value)
         return items[0] if items else ""
 
-    if "Contractor" not in out.columns and "Contractors" in out.columns:
-        out["Contractor"] = out["Contractors"].map(_first_list_item)
-    if "Driver" not in out.columns and "Drivers" in out.columns:
-        out["Driver"] = out["Drivers"].map(_first_list_item)
-    if "Route_name" not in out.columns and "Route_names" in out.columns:
-        out["Route_name"] = out["Route_names"].map(_first_list_item)
+    def _fill_dimension_from_legacy(single_col: str, legacy_col: str) -> None:
+        if legacy_col not in out.columns:
+            return
+        legacy_values = out[legacy_col].map(_first_list_item)
+        if single_col not in out.columns:
+            out[single_col] = legacy_values
+            return
+        current_values = out[single_col].fillna("").astype(str).str.strip()
+        out[single_col] = current_values.where(current_values.ne(""), legacy_values)
+
+    _fill_dimension_from_legacy("Contractor", "Contractors")
+    _fill_dimension_from_legacy("Driver", "Drivers")
+    _fill_dimension_from_legacy("Route_name", "Route_names")
 
     def _time_from_intervals(intervals_raw: Any, target_types: set[str]) -> str:
         intervals = _load_intervals(intervals_raw)
@@ -1093,16 +1100,6 @@ def render_kpi_charts(
         hit_label="Not lost",
         miss_label="Warehouse/sorting lost",
     )
-    _upsert_kpi_metric_and_chart(
-        kpi_payload,
-        category="hub_assessment",
-        metric_name="Intercept success rate",
-        hit_count=int(dsp_hub_metrics["hub"]["intercept_success_rate"]["hit"]),
-        total_count=int(dsp_hub_metrics["hub"]["intercept_success_rate"]["total"]),
-        hit_label="Intercepted successfully",
-        miss_label="Intercept failed",
-    )
-
     st.markdown("#### DSP相关指标")
     dsp_cols = st.columns(2)
     pod_metric = dsp_hub_metrics["dsp"]["pod_qualified_rate"]
@@ -1146,18 +1143,16 @@ def render_kpi_charts(
         metric = dsp_hub_metrics["hub"]["scan_rates"].get(key, {"rate": 0.0, "hit": 0, "total": 0})
         hub_scan_cols[idx].metric(f"<{key}上网率", f"{metric['rate']:.2%}", f"{metric['hit']}/{metric['total']}")
 
-    hub_cols = st.columns(3)
+    hub_cols = st.columns(2)
     avg_hours = dsp_hub_metrics["hub"]["avg_first_track_to_sort_scan_hours"]
     avg_sample = dsp_hub_metrics["hub"]["first_track_to_sort_scan_sample"]
-    intercept_metric = dsp_hub_metrics["hub"]["intercept_success_rate"]
     warehouse_lost_metric = dsp_hub_metrics["hub"]["warehouse_lost_rate"]
     warehouse_not_lost_hit = max(int(warehouse_lost_metric["total"]) - int(warehouse_lost_metric["hit"]), 0)
     warehouse_not_lost_rate = rate(warehouse_not_lost_hit, int(warehouse_lost_metric["total"]))
     hub_cols[0].metric("首轨迹到首个上网节点平均时长（warehouse或Sort Scanned at）", f"{avg_hours:.2f}h", f"样本 {avg_sample}")
-    hub_cols[1].metric("拦截成功率", f"{intercept_metric['rate']:.2%}", f"{intercept_metric['hit']}/{intercept_metric['total']}")
-    hub_cols[2].metric("仓库非丢件率（1-丢件率）", f"{warehouse_not_lost_rate:.2%}", f"{warehouse_not_lost_hit}/{warehouse_lost_metric['total']}")
+    hub_cols[1].metric("仓库非丢件率（1-丢件率）", f"{warehouse_not_lost_rate:.2%}", f"{warehouse_not_lost_hit}/{warehouse_lost_metric['total']}")
 
-    st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=intervals首节点到最近的warehouse或最近的type=sort且description含Scanned at节点，取耗时更短者并在阈值内）；拦截成功率分母=取消件；仓库丢件率分母=出现过warehouse/sorting的包裹。")
+    st.caption("Hub口径：上网率按单号统计（分母=全部单号，分子=intervals首节点到最近的warehouse或最近的type=sort且description含Scanned at节点，取耗时更短者并在阈值内）；仓库丢件率分母=出现过warehouse/sorting的包裹。")
 
     st.markdown("#### Hub上网率明细（分母/分子）")
     hub_scan_detail_df = build_hub_scan_detail_table(hub_metric_scope_df, thresholds=[12, 24, 48, 72])
@@ -1291,78 +1286,6 @@ def render_kpi_charts(
 
     scan_detail_df = scan_detail_df.drop(columns=["created_dt", "first_scanned_dt"])
 
-    st.markdown("#### Monthly Lost Rate (no events within 120h after Last Scan; exclude waybills not yet 120h old)")
-    monthly_lost_metric = next((m for m in kpi_payload["metrics"] if m.get("metric") == "overall monthly lost rate"), None)
-
-    first_scanned_dt = to_datetime_series(result_df, "first_scanned_time")
-    last_scanned_dt = to_datetime_series(result_df, "last_scanned_time")
-    ofd_dt = to_datetime_series(result_df, "out_for_delivery_time")
-    attempted_dt = to_datetime_series(result_df, "attempted_time")
-    delivered_dt = to_datetime_series(result_df, "delivered_time")
-
-    analysis_df = result_df.copy()
-    analysis_df["first_scanned_dt"] = first_scanned_dt
-    analysis_df["last_scanned_dt"] = last_scanned_dt
-    analysis_df["ofd_dt"] = ofd_dt
-    analysis_df["attempted_dt"] = attempted_dt
-    analysis_df["delivered_dt"] = delivered_dt
-
-    lost_analysis = build_lost_package_analysis(analysis_df, fetch_reference_time=fetch_reference_time)
-    lost_condition = lost_analysis["lost_mask"]
-
-    lost_detail_columns = [
-        "tracking_id",
-        "Region",
-        "State",
-        "shipperName",
-        "created_time",
-        "first_scanned_time",
-        "last_scanned_time",
-        "out_for_delivery_time",
-        "attempted_time",
-        "delivered_time",
-    ]
-    lost_detail_df = result_df.loc[lost_condition].copy()
-    for column in lost_detail_columns:
-        if column not in lost_detail_df.columns:
-            lost_detail_df[column] = pd.NA
-    lost_detail_df = lost_detail_df[lost_detail_columns]
-
-    if kpi_payload.get("has_monthly_lost_data") and monthly_lost_metric:
-        metric_cols = st.columns([2, 1])
-        metric_cols[0].metric("Overall monthly lost rate", f"{monthly_lost_metric['rate']:.2%}")
-        metric_cols[1].download_button(
-            tr("download_lost"),
-            data=lost_detail_df.to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"lost_details_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-            mime="text/csv",
-            use_container_width=True,
-            disabled=lost_detail_df.empty,
-        )
-        render_percentage_pie(
-            "Lost share",
-            int(monthly_lost_metric["hit"]),
-            int(monthly_lost_metric["total"]),
-            hit_label="Lost",
-            miss_label="Not lost",
-            chart_key=f"lost_{refresh_key}",
-        )
-        st.markdown(f"##### {tr('lost_detail')}")
-        _render_optional_dataframe(
-            lost_detail_df,
-            show_details,
-            tr("lost_empty"),
-            "已隐藏丢包明细表格；如需查看请勾选“显示详细数据表”。",
-        )
-    else:
-        st.info(tr("lost_no_scan"))
-
-    st.markdown("#### Monthly Damage Rate (Reserved)")
-    st.info("Reserved area: monthly damage rate metric to be implemented.")
-
-    st.markdown("#### Interception Success Rate (Reserved)")
-    st.info("Reserved area: interception success-rate metric to be implemented.")
-
     return kpi_payload
 
 
@@ -1370,7 +1293,7 @@ def build_layout_specific_report_payload(kpi_payload: dict[str, Any], layout_mod
     if layout_mode != "compact":
         return kpi_payload
 
-    compact_metric_names = {"<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "POD qualified rate", "24h attempt rate", "DSP lost rate", "Warehouse lost rate", "Intercept success rate"}
+    compact_metric_names = {"<24h delivery rate", "<48h delivery rate", "<72h delivery rate", "POD qualified rate", "24h attempt rate", "DSP lost rate", "Warehouse lost rate"}
     compact_metrics = [m for m in kpi_payload.get("metrics", []) if m.get("metric") in compact_metric_names]
     compact_charts = [c for c in kpi_payload.get("charts", []) if c.get("chart") in compact_metric_names]
 
@@ -2098,15 +2021,6 @@ def main() -> None:
             show_detailed_tables,
             tr("route_attempts_lost_empty"),
             "已隐藏丢件明细表格；如需查看请勾选“显示详细数据表”。",
-        )
-
-        invalid_route_df = build_invalid_route_summary(filtered_df)
-        st.subheader(tr("invalid_route_section"))
-        _render_optional_dataframe(
-            invalid_route_df,
-            show_detailed_tables,
-            tr("invalid_route_empty"),
-            "已隐藏异常 Route 汇总表格；如需查看请勾选“显示详细数据表”。",
         )
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

@@ -19,7 +19,8 @@ POD_COLUMNS: list[str] = []
 for i in range(1, POD_IMAGE_EXPORT_N + 1):
     POD_COLUMNS += [f"pod_feedback_{i}", f"pod_score_{i}"]
 
-EXPORT_EXCLUDED_COLUMNS = set(POD_COLUMNS)
+LEGACY_EXPORT_COLUMNS = {"Contractors", "Drivers", "Route_names"}
+EXPORT_EXCLUDED_COLUMNS = set(POD_COLUMNS) | LEGACY_EXPORT_COLUMNS
 
 
 REGION_BY_HUB = {
@@ -1589,12 +1590,31 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         fallback_state = str(row.get("State") or row.get("sender_province") or "")
         route_info = parse_route_identity(route_name, fallback_state=fallback_state)
         df.at[idx, "Route_name"] = route_name
+        drivers_raw = row.get("Drivers") or ""
+        contractors_raw = row.get("Contractors") or ""
+
         existing_driver = str(row.get("Driver") or "").strip()
-        df.at[idx, "Driver"] = existing_driver
+        if (not existing_driver) and drivers_raw:
+            try:
+                loaded_drivers = json.loads(drivers_raw) if isinstance(drivers_raw, str) else drivers_raw
+            except Exception:
+                loaded_drivers = []
+            if isinstance(loaded_drivers, list) and loaded_drivers:
+                existing_driver = str(loaded_drivers[0] or "").strip()
+        df.at[idx, "Driver"] = existing_driver or route_info["Driver"]
+
         existing_hub = str(row.get("Hub") or "").strip()
-        df.at[idx, "Hub"] = existing_hub
+        df.at[idx, "Hub"] = existing_hub or route_info["Hub"]
+
         existing_contractor = str(row.get("Contractor") or "").strip()
-        df.at[idx, "Contractor"] = existing_contractor
+        if (not existing_contractor) and contractors_raw:
+            try:
+                loaded_contractors = json.loads(contractors_raw) if isinstance(contractors_raw, str) else contractors_raw
+            except Exception:
+                loaded_contractors = []
+            if isinstance(loaded_contractors, list) and loaded_contractors:
+                existing_contractor = str(loaded_contractors[0] or "").strip()
+        df.at[idx, "Contractor"] = existing_contractor or route_info["Contractor"]
         existing_route_type = str(row.get("Route_type") or "").strip()
         df.at[idx, "Route_type"] = existing_route_type or route_info["Route_type"]
     return df

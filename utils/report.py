@@ -221,7 +221,6 @@ def _build_detailed_overview_table(detail_df: pd.DataFrame, source_df: pd.DataFr
         row["DSP Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "DSP lost rate"))
         row["Warehouse Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "Warehouse lost rate"))
         row["Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "lost rate"))
-        row["Intercept Success Rate"] = _safe_rate_value(_metric_rate(metric_map, "Intercept success rate"))
         rows.append(row)
 
     rows: list[dict[str, Any]] = []
@@ -303,7 +302,6 @@ def _build_hub_table(detail_df: pd.DataFrame, hub_name: str, source_df: pd.DataF
         row["DSP Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "DSP lost rate"))
         row["Warehouse Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "Warehouse lost rate"))
         row["Lost Rate"] = _safe_rate_value(_metric_rate(metric_map, "lost rate"))
-        row["Intercept Success Rate"] = _safe_rate_value(_metric_rate(metric_map, "Intercept success rate"))
         rows.append(row)
 
     _append_row(hub_name, hub_df)
@@ -1003,31 +1001,6 @@ def build_kpi_report_payload(
         ]
     )
 
-    canceled_count = 0
-    intercept_success_count = 0
-    for _, row in df.iterrows():
-        intervals = _load_intervals(row.get("Intervals"))
-        if not intervals:
-            continue
-        event_types = [str(event.get("type") or "").strip().lower() for event in intervals]
-        if "cancel" not in event_types:
-            continue
-        canceled_count += 1
-        cancel_index = event_types.index("cancel")
-        has_delivery_before_cancel = any(t in {"out-for-delivery", "ofd", "outfordelivery", "success", "delivered", "fail", "failed", "failure"} for t in event_types[: cancel_index + 1])
-        if not has_delivery_before_cancel:
-            intercept_success_count += 1
-
-    metrics.append(
-        {
-            "category": "hub_assessment",
-            "metric": "Intercept success rate",
-            "hit": intercept_success_count,
-            "total": canceled_count,
-            "rate": rate(intercept_success_count, canceled_count),
-        }
-    )
-
     lost_analysis = build_lost_package_analysis(df, fetch_reference_time=fetch_reference_time)
     scanned_base = lost_analysis["scanned_base"]
     scanned_base["lost"] = lost_analysis["lost_mask"].loc[scanned_base.index].astype(int)
@@ -1294,55 +1267,6 @@ def kpi_report_to_excel_bytes(
             pod_review_df = _ensure_manual_review_weight_columns(pod_review_df, source_df=source_df)
             pod_review_df.to_excel(writer, index=False, sheet_name="manual_review_data")
 
-        if source_df is not None and not source_df.empty:
-            lost_analysis = build_lost_package_analysis(source_df)
-            warehouse_lost_mask = lost_analysis.get("lost_mask", pd.Series(False, index=source_df.index))
-            attempt_level_source_df = build_attempt_kpi_detail_df(source_df)
-            dsp_lost_tracking_ids = set(
-                attempt_level_source_df.loc[
-                    attempt_level_source_df["attempt_result"] == "lost", "tracking_id"
-                ].astype(str)
-            ) if (not attempt_level_source_df.empty and "tracking_id" in attempt_level_source_df.columns) else set()
-            dsp_lost_mask = source_df["tracking_id"].astype(str).isin(dsp_lost_tracking_ids) if "tracking_id" in source_df.columns else pd.Series(False, index=source_df.index)
-            lost_detail_columns = [
-                "tracking_id",
-                "Region",
-                "State",
-                "shipperName",
-                "Hub",
-                "Contractor",
-                "Route_name",
-                "created_time",
-                "first_scanned_time",
-                "last_scanned_time",
-                "first_out_for_delivery_date",
-                "out_for_delivery_time",
-                "attempted_time",
-                "delivered_time",
-                "lost_source",
-            ]
-
-            warehouse_mask = warehouse_lost_mask.reindex(source_df.index, fill_value=False) if len(warehouse_lost_mask) == len(source_df) else pd.Series(False, index=source_df.index)
-            dsp_mask = dsp_lost_mask.reindex(source_df.index, fill_value=False) if len(dsp_lost_mask) == len(source_df) else pd.Series(False, index=source_df.index)
-            combined_lost_mask = warehouse_mask | dsp_mask
-
-            if combined_lost_mask.any():
-                lost_detail_df = source_df.loc[combined_lost_mask].copy()
-                lost_detail_df["lost_source"] = ""
-                lost_detail_df.loc[warehouse_mask[combined_lost_mask], "lost_source"] = "warehouse_lost_numerator"
-                lost_detail_df.loc[dsp_mask[combined_lost_mask], "lost_source"] = lost_detail_df.loc[dsp_mask[combined_lost_mask], "lost_source"].replace("", "dsp_lost_numerator")
-                both_mask = warehouse_mask[combined_lost_mask] & dsp_mask[combined_lost_mask]
-                lost_detail_df.loc[both_mask, "lost_source"] = "warehouse_lost_numerator+dsp_lost_numerator"
-                lost_detail_df = lost_detail_df.drop_duplicates(subset=["tracking_id"], keep="first") if "tracking_id" in lost_detail_df.columns else lost_detail_df.drop_duplicates(keep="first")
-            else:
-                lost_detail_df = pd.DataFrame(columns=lost_detail_columns)
-
-            for column in lost_detail_columns:
-                if column not in lost_detail_df.columns:
-                    lost_detail_df[column] = pd.NA
-            lost_detail_df = lost_detail_df[lost_detail_columns]
-            lost_detail_df.to_excel(writer, index=False, sheet_name="lost_detail_data")
-
         if not detailed_layout_ready:
             data_ws = writer.sheets["kpi_chart_data"]
             chart_ws = workbook.add_worksheet("kpi_charts")
@@ -1363,9 +1287,6 @@ def kpi_report_to_excel_bytes(
             pod_ws.set_column(0, 16, 20)
             pod_ws.set_column(17, 17, 60)
             pod_ws.set_column(18, 20, 24)
-        if "lost_detail_data" in writer.sheets:
-            lost_ws = writer.sheets["lost_detail_data"]
-            lost_ws.set_column(0, 12, 20)
         if not detailed_layout_ready:
             row_cursor = 0
             col_cursor = 0
