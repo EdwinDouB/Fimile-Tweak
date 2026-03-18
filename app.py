@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 import ast
+import io
 import json
 import re
 
@@ -191,6 +192,9 @@ def build_route_attempts_view(
 
             matched_type = route_utils.event_type(matched_terminal)
             route_name = str(current_ofd_event.get("route") or matched_terminal.get("route") or "").strip()
+            route_identity = parse_route_identity(route_name, fallback_state=str(row.get("State") or ""))
+            contractor_name = str(row.get("Contractor") or "").strip() or str(route_identity.get("Contractor") or "").strip()
+            driver_name = str(row.get("Driver") or "").strip() or str(route_identity.get("Driver") or "").strip()
             route_rows.append(
                 {
                     "route": route_name or "UNKNOWN_ROUTE",
@@ -201,6 +205,10 @@ def build_route_attempts_view(
                     "created_time": row.get("created_time", ""),
                     "out_for_delivery_time": fmt_dt(to_local_dt(current_ofd_event.get("time"))),
                     "finish_time": fmt_dt(to_local_dt(matched_terminal.get("time"))),
+                    "Contractor": contractor_name,
+                    "Driver": driver_name,
+                    "Weight": row.get("Weight", ""),
+                    "delivered_time": row.get("delivered_time", ""),
                     "POD是否合格": "是" if _pod_qualified(matched_terminal.get("POD")) else "否",
                 }
             )
@@ -1315,6 +1323,70 @@ def _render_optional_dataframe(df: Any, show_details: bool, empty_message: str, 
     st.caption(hidden_message)
 
 
+def _format_dsp_detail_date_range_label(start_date: date | None, end_date: date | None) -> str:
+    if start_date and end_date:
+        return f"{start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+    if start_date:
+        return f"{start_date.strftime('%Y-%m-%d')} to {start_date.strftime('%Y-%m-%d')}"
+    if end_date:
+        return f"{end_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}"
+    return "All Dates"
+
+
+def _sanitize_excel_sheet_name(sheet_name: str, fallback: str = "Sheet1") -> str:
+    cleaned = re.sub(r"[:\\\\/?*\\[\\]]", "_", str(sheet_name or "").strip())
+    if not cleaned:
+        cleaned = fallback
+    return cleaned[:31]
+
+
+def build_dsp_detail_export_df(route_attempts_df: pd.DataFrame, contractor_name: str) -> pd.DataFrame:
+    if route_attempts_df.empty:
+        return pd.DataFrame(columns=["NO.", "Tracking_number", "Date_of_Delivery", "Route_name", "Driver name", "Weight"])
+
+    contractor_value = str(contractor_name or "").strip()
+    if not contractor_value:
+        return pd.DataFrame(columns=["NO.", "Tracking_number", "Date_of_Delivery", "Route_name", "Driver name", "Weight"])
+
+    detail_df = route_attempts_df.copy()
+    detail_df["Contractor"] = detail_df.get("Contractor", "").fillna("").astype(str).str.strip()
+    detail_df = detail_df[
+        detail_df["result"].fillna("").astype(str).str.strip().eq("success")
+        & detail_df["Contractor"].str.casefold().eq(contractor_value.casefold())
+    ].copy()
+    if detail_df.empty:
+        return pd.DataFrame(columns=["NO.", "Tracking_number", "Date_of_Delivery", "Route_name", "Driver name", "Weight"])
+
+    delivered_sort_series = detail_df.get("delivered_time", pd.Series("", index=detail_df.index)).fillna("").astype(str).str.strip()
+    finish_sort_series = detail_df.get("finish_time", pd.Series("", index=detail_df.index)).fillna("").astype(str).str.strip()
+    detail_df["delivery_sort_dt"] = pd.to_datetime(delivered_sort_series.where(delivered_sort_series.ne(""), finish_sort_series), errors="coerce")
+    detail_df["finish_sort_dt"] = pd.to_datetime(finish_sort_series, errors="coerce")
+    detail_df = detail_df.sort_values(by=["delivery_sort_dt", "finish_sort_dt", "tracking_id"], ascending=[True, True, True], na_position="last")
+    detail_df = detail_df.drop_duplicates(subset=["tracking_id"], keep="last").reset_index(drop=True)
+
+    delivered_series = detail_df.get("delivered_time", pd.Series("", index=detail_df.index)).fillna("").astype(str).str.strip()
+    finish_series = detail_df.get("finish_time", pd.Series("", index=detail_df.index)).fillna("").astype(str).str.strip()
+    export_df = pd.DataFrame(
+        {
+            "NO.": range(1, len(detail_df) + 1),
+            "Tracking_number": detail_df.get("tracking_id", "").fillna("").astype(str).str.strip(),
+            "Date_of_Delivery": delivered_series.where(delivered_series.ne(""), finish_series),
+            "Route_name": detail_df.get("route", "").fillna("").astype(str).str.strip(),
+            "Driver name": detail_df.get("Driver", "").fillna("").astype(str).str.strip(),
+            "Weight": detail_df.get("Weight", "").fillna("").astype(str).str.strip(),
+        }
+    )
+    return export_df
+
+
+def build_dsp_detail_excel_bytes(detail_df: pd.DataFrame, workbook_title: str) -> bytes:
+    output = io.BytesIO()
+    sheet_name = _sanitize_excel_sheet_name(workbook_title, fallback="Overview")
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        detail_df.to_excel(writer, index=False, sheet_name=sheet_name)
+    return output.getvalue()
+
+
 def build_layout_specific_export_df(filtered_df: pd.DataFrame, layout_mode: str) -> pd.DataFrame:
     if layout_mode != "compact":
         return build_export_df(filtered_df)
@@ -1609,6 +1681,8 @@ def main() -> None:
         st.session_state["contractor_override_hub"] = ""
     if "contractor_override_name" not in st.session_state:
         st.session_state["contractor_override_name"] = ""
+    if "dsp_detail_contractor" not in st.session_state:
+        st.session_state["dsp_detail_contractor"] = ""
     st.selectbox(
         tr("language_label"),
         options=["zh", "en"],
@@ -2034,7 +2108,42 @@ def main() -> None:
         csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
         report_payload = build_layout_specific_report_payload(kpi_payload, layout_mode)
         kpi_report_data = None
-        c_csv, c_report = st.columns(2)
+        export_route_attempts_df, _, _, _ = build_route_attempts_view(export_base_df)
+        export_route_attempts_df = _filter_df_by_datetime_window(
+            export_route_attempts_df,
+            "finish_time",
+            start_dt=report_start_dt,
+            end_dt=report_end_dt,
+        )
+        contractor_options = sorted(
+            export_base_df["Contractor"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()
+        ) if "Contractor" in export_base_df.columns else []
+        current_dsp_contractor = str(st.session_state.get("dsp_detail_contractor", "")).strip()
+        if current_dsp_contractor and current_dsp_contractor not in contractor_options:
+            st.session_state["dsp_detail_contractor"] = ""
+            current_dsp_contractor = ""
+
+        export_date_range_label = _format_dsp_detail_date_range_label(
+            applied_filter_start if applied_filter_start is not None else st.session_state.get("query_start_date"),
+            applied_filter_end if applied_filter_end is not None else st.session_state.get("query_end_date"),
+        )
+        selected_dsp_contractor = st.selectbox(
+            tr("download_dsp_contractor_label"),
+            options=[""] + contractor_options,
+            format_func=lambda value: value if value else tr("download_dsp_contractor_placeholder"),
+            key="dsp_detail_contractor",
+        )
+        dsp_detail_df = build_dsp_detail_export_df(export_route_attempts_df, selected_dsp_contractor)
+        dsp_workbook_title = f"{selected_dsp_contractor} {export_date_range_label} Delivered Package Details".strip()
+        dsp_file_name = f"{dsp_workbook_title}.xlsx" if selected_dsp_contractor else f"DSP_Detail_{stamp}.xlsx"
+        dsp_detail_bytes = build_dsp_detail_excel_bytes(dsp_detail_df, dsp_workbook_title or "Delivered Package Details") if not dsp_detail_df.empty else b""
+
+        if not selected_dsp_contractor:
+            st.caption(tr("download_dsp_requires_contractor"))
+        elif dsp_detail_df.empty:
+            st.caption(tr("download_dsp_empty"))
+
+        c_csv, c_report, c_dsp = st.columns(3)
         c_csv.download_button(
             tr("download_csv"),
             data=csv_data,
@@ -2058,6 +2167,13 @@ def main() -> None:
             )
         except Exception as err:
             c_report.error(tr("report_export_failed").format(error=str(err)))
+        c_dsp.download_button(
+            tr("download_dsp_detail"),
+            data=dsp_detail_bytes,
+            file_name=dsp_file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            disabled=(not selected_dsp_contractor) or dsp_detail_df.empty,
+        )
 
 
 if __name__ == "__main__":
