@@ -3,6 +3,7 @@ import streamlit as st
 from datetime import date, datetime, time, timedelta
 import json
 from typing import Any
+from pathlib import Path
 
 
 from dotenv import load_dotenv
@@ -23,28 +24,80 @@ def _load_mysql_config() -> dict[str, str | int]:
         "username": _read_with_aliases("MYSQL_USERNAME", "MYSQL_USER", "DB_USERNAME", "DB_USER"),
         "password": _read_with_aliases("MYSQL_PASSWORD", "MYSQL_PASS", "DB_PASSWORD"),
         "database": _read_with_aliases("MYSQL_DATABASE", "MYSQL_DB", "DB_DATABASE", "DB_NAME"),
+        "ssl_ca": _read_with_aliases("MYSQL_SSL_CA", "DB_SSL_CA"),
     }
 
 
-def _resolve_router_messages_table(conn: Any) -> str:
-    """Pick an existing router_messages cache table, with env override support."""
-    config = _load_mysql_config()
-    schema = str(config["database"])
-    preferred = _read_with_aliases("ROUTER_MESSAGES_TABLE", "MYSQL_ROUTER_MESSAGES_TABLE")
+def _resolve_path(path_value: str) -> str:
+    raw = str(path_value or "").strip()
+    if not raw:
+        return ""
 
-    candidates = [
-        preferred,
-        "third_party_transit_cache",
-        "transit_third_party_cache",
-        "third_party_cache",
-        "transit_router_messages_cache",
-    ]
-    candidates = [name.strip() for name in candidates if str(name).strip()]
+    candidates = []
+    raw_path = Path(raw).expanduser()
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        candidates.extend(
+            [
+                Path.cwd() / raw_path,
+                Path(__file__).resolve().parent.parent / raw_path,
+            ]
+        )
+
+    for candidate in candidates:
+        try:
+            if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                return str(candidate.resolve())
+        except Exception:
+            continue
+
+    default_ca_candidates = (
+        Path("/etc/ssl/certs/ca-certificates.crt"),
+        Path("/etc/pki/tls/certs/ca-bundle.crt"),
+        Path("/etc/ssl/cert.pem"),
+    )
+    for candidate in default_ca_candidates:
+        try:
+            if candidate.exists() and candidate.is_file() and candidate.stat().st_size > 0:
+                return str(candidate.resolve())
+        except Exception:
+            continue
+
+    return ""
+
+
+def _build_mysql_connect_kwargs(pymysql_module: Any) -> dict[str, Any]:
+    config = _load_mysql_config()
+    connect_kwargs: dict[str, Any] = {
+        "host": str(config["host"]),
+        "port": int(config["port"]),
+        "user": str(config["username"]),
+        "password": str(config["password"]),
+        "database": str(config["database"]),
+        "charset": "utf8mb4",
+        "cursorclass": pymysql_module.cursors.DictCursor,
+        "autocommit": True,
+    }
+
+    ssl_ca = _resolve_path(str(config.get("ssl_ca") or ""))
+    if ssl_ca:
+        connect_kwargs["ssl"] = {"ca": ssl_ca}
+
+    return connect_kwargs
+
+
+def _connect_mysql(pymysql_module: Any) -> Any:
+    return pymysql_module.connect(**_build_mysql_connect_kwargs(pymysql_module))
+
+
+def _discover_table_candidates(conn: Any, explicit_name: str, candidates: list[str]) -> tuple[str, set[str]]:
+    requested = [explicit_name, *candidates]
+    requested = [name.strip() for name in requested if str(name).strip()]
 
     with conn.cursor() as cur:
         existing_tables: set[str] = set()
 
-        # Prefer SHOW TABLES: some DB users have restricted access to information_schema.
         try:
             cur.execute("SHOW TABLES")
             for row in cur.fetchall() or []:
@@ -58,9 +111,10 @@ def _resolve_router_messages_table(conn: Any) -> str:
             existing_tables = set()
 
         if not existing_tables:
+            schema = str(_load_mysql_config()["database"])
             try:
-                if candidates:
-                    placeholders = ", ".join(["%s"] * len(candidates))
+                if requested:
+                    placeholders = ", ".join(["%s"] * len(requested))
                     cur.execute(
                         f"""
                             SELECT table_name
@@ -68,24 +122,115 @@ def _resolve_router_messages_table(conn: Any) -> str:
                             WHERE table_schema = %s
                             AND table_name IN ({placeholders})
                         """,
-                        [schema, *candidates],
+                        [schema, *requested],
                     )
-                    existing_tables = {str(row.get("table_name") or "") for row in cur.fetchall()}
+                    existing_tables = {
+                        str(row.get("table_name") or "").strip()
+                        for row in cur.fetchall() or []
+                        if isinstance(row, dict)
+                    }
             except Exception:
                 existing_tables = set()
 
-        for candidate in candidates:
+        for candidate in requested:
             if candidate in existing_tables:
-                return candidate
+                return candidate, existing_tables
 
-        if existing_tables:
-            fuzzy_candidates = sorted(table for table in existing_tables if "third_party_cache" in table)
-            if fuzzy_candidates:
-                return fuzzy_candidates[0]
+    return "", existing_tables
 
+
+def _resolve_tracking_source_table(conn: Any) -> str:
+    preferred = _read_with_aliases("TRACKING_SOURCE_TABLE", "MYSQL_TRACKING_SOURCE_TABLE")
+    table_name, existing_tables = _discover_table_candidates(
+        conn,
+        preferred,
+        [
+            "waybill_waybills",
+            "biz_delivery_order",
+        ],
+    )
+    if table_name:
+        return table_name
+
+    if existing_tables:
+        fuzzy_candidates = sorted(
+            table
+            for table in existing_tables
+            if "delivery" in table.casefold() and "order" in table.casefold()
+        )
+        if fuzzy_candidates:
+            return fuzzy_candidates[0]
+
+    return ""
+
+
+def _resolve_tracking_number_column(columns: set[str]) -> str:
+    preferred = _read_with_aliases("TRACKING_NUMBER_COLUMN", "MYSQL_TRACKING_NUMBER_COLUMN")
+    if preferred and preferred in columns:
+        return preferred
+
+    for candidate in (
+        "tracking_number",
+        "tracking_id",
+        "waybill_no",
+        "waybill_number",
+        "mail_no",
+        "express_no",
+        "logistics_no",
+        "order_no",
+    ):
+        if candidate in columns:
+            return candidate
+    return ""
+
+
+def _resolve_tracking_created_at_column(columns: set[str]) -> str:
+    preferred = _read_with_aliases("TRACKING_CREATED_AT_COLUMN", "MYSQL_TRACKING_CREATED_AT_COLUMN")
+    if preferred and preferred in columns:
+        return preferred
+
+    for candidate in (
+        "created_at",
+        "create_time",
+        "created_time",
+        "gmt_create",
+        "order_time",
+        "delivery_time",
+        "first_out_for_delivery_date",
+    ):
+        if candidate in columns:
+            return candidate
+    return ""
+
+
+def _resolve_router_messages_table(conn: Any) -> str:
+    """Pick an existing router_messages cache table, with env override support."""
+    preferred = _read_with_aliases("ROUTER_MESSAGES_TABLE", "MYSQL_ROUTER_MESSAGES_TABLE")
+    candidates = [
+        "third_party_transit_cache",
+        "transit_third_party_cache",
+        "third_party_cache",
+        "transit_router_messages_cache",
+        "biz_delivery_dimension_item",
+    ]
+    table_name, existing_tables = _discover_table_candidates(conn, preferred, candidates)
+    if table_name:
+        return table_name
+
+    if existing_tables:
+        fuzzy_candidates = sorted(
+            table
+            for table in existing_tables
+            if "third_party_cache" in table or ("dimension" in table and "item" in table)
+        )
+        if fuzzy_candidates:
+            return fuzzy_candidates[0]
+
+    with conn.cursor() as cur:
         # Last-resort lookup when metadata queries are restricted.
-        for candidate in candidates:
-            if not candidate.replace("_", "").isalnum():
+        for candidate in [preferred, *candidates]:
+            candidate = str(candidate or "").strip()
+            if not candidate or not candidate.replace("_", "").isalnum():
                 continue
             try:
                 cur.execute(f"SELECT 1 FROM {candidate} LIMIT 1")
@@ -140,6 +285,33 @@ def _resolve_router_messages_order_column(columns: set[str]) -> str:
             return candidate
     return ""
 
+
+def _resolve_router_messages_tracking_column(columns: set[str]) -> str:
+    preferred = _read_with_aliases("ROUTER_MESSAGES_TRACKING_COLUMN", "MYSQL_ROUTER_MESSAGES_TRACKING_COLUMN")
+    if preferred and preferred in columns:
+        return preferred
+    return _resolve_tracking_number_column(columns)
+
+
+def _resolve_router_messages_payload_column(columns: set[str]) -> str:
+    preferred = _read_with_aliases("ROUTER_MESSAGES_PAYLOAD_COLUMN", "MYSQL_ROUTER_MESSAGES_PAYLOAD_COLUMN")
+    if preferred and preferred in columns:
+        return preferred
+
+    for candidate in (
+        "router_messages",
+        "route_messages",
+        "route_payload",
+        "payload",
+        "raw_payload",
+        "raw_data",
+        "content",
+        "message_body",
+    ):
+        if candidate in columns:
+            return candidate
+    return ""
+
 DB_FETCH_BATCH_SIZE = max(100, int(read_config("DB_FETCH_BATCH_SIZE", "5000")))
 
 def _require_db_env() -> None:
@@ -181,28 +353,37 @@ def fetch_tracking_numbers_by_date(start_date: date, end_date: date) -> list[str
     # Use an exclusive upper-bound at next-day 00:00:00 to avoid dropping rows on end_date.
     end_exclusive_dt = datetime.combine(end_date + timedelta(days=1), time.min)
 
-    config = _load_mysql_config()
-    conn = pymysql.connect(
-        host=str(config["host"]),
-        port=int(config["port"]),
-        user=str(config["username"]),
-        password=str(config["password"]),
-        database=str(config["database"]),
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    conn = _connect_mysql(pymysql)
 
     try:
+        table_name = _resolve_tracking_source_table(conn)
+        if not table_name:
+            raise RuntimeError("未找到运单主表，请配置 TRACKING_SOURCE_TABLE / MYSQL_TRACKING_SOURCE_TABLE。")
+        if not table_name.replace("_", "").isalnum():
+            raise RuntimeError(f"运单主表名不合法：{table_name}")
+
+        table_columns = _load_table_columns(conn, table_name)
+        tracking_number_column = _resolve_tracking_number_column(table_columns)
+        if not tracking_number_column:
+            raise RuntimeError(
+                f"表 {table_name} 中未找到运单号字段，请配置 TRACKING_NUMBER_COLUMN / MYSQL_TRACKING_NUMBER_COLUMN。"
+            )
+
+        created_at_column = _resolve_tracking_created_at_column(table_columns)
+
         with conn.cursor() as cur:
-            sql = """
-                SELECT DISTINCT tracking_number
-                FROM waybill_waybills
-                WHERE created_at >= %s AND created_at < %s
-                AND tracking_number IS NOT NULL AND tracking_number <> ''
-                ORDER BY tracking_number ASC
+            sql = f"""
+                SELECT DISTINCT {tracking_number_column} AS tracking_number
+                FROM {table_name}
+                WHERE {tracking_number_column} IS NOT NULL AND {tracking_number_column} <> ''
             """
-            cur.execute(sql, (start_dt, end_exclusive_dt))
+            params: list[Any] = []
+            if created_at_column:
+                sql += f" AND {created_at_column} >= %s AND {created_at_column} < %s"
+                params.extend([start_dt, end_exclusive_dt])
+            sql += " ORDER BY tracking_number ASC"
+
+            cur.execute(sql, params)
 
             tracking_numbers: list[str] = []
             while True:
@@ -244,17 +425,7 @@ def fetch_receive_province_map(tracking_ids: tuple[str, ...]) -> dict[str, str]:
     if not tracking_ids_clean:
         return {}
 
-    config = _load_mysql_config()
-    conn = pymysql.connect(
-        host=str(config["host"]),
-        port=int(config["port"]),
-        user=str(config["username"]),
-        password=str(config["password"]),
-        database=str(config["database"]),
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    conn = _connect_mysql(pymysql)
 
     receive_province_map: dict[str, str] = {}
     try:
@@ -302,17 +473,7 @@ def fetch_sender_info_map(tracking_ids: tuple[str, ...]) -> dict[str, dict[str, 
     if not tracking_ids_clean:
         return {}
 
-    config = _load_mysql_config()
-    conn = pymysql.connect(
-        host=str(config["host"]),
-        port=int(config["port"]),
-        user=str(config["username"]),
-        password=str(config["password"]),
-        database=str(config["database"]),
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    conn = _connect_mysql(pymysql)
 
     sender_info_map: dict[str, dict[str, str]] = {}
     try:
@@ -364,17 +525,7 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
     if not tracking_ids_clean:
         return {}
 
-    config = _load_mysql_config()
-    conn = pymysql.connect(
-        host=str(config["host"]),
-        port=int(config["port"]),
-        user=str(config["username"]),
-        password=str(config["password"]),
-        database=str(config["database"]),
-        charset="utf8mb4",
-        cursorclass=pymysql.cursors.DictCursor,
-        autocommit=True,
-    )
+    conn = _connect_mysql(pymysql)
 
     payload_map: dict[str, Any] = {}
     try:
@@ -388,11 +539,13 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
         if not table_columns:
             return {}
 
-        if "tracking_number" not in table_columns or "router_messages" not in table_columns:
+        tracking_column = _resolve_router_messages_tracking_column(table_columns)
+        payload_column = _resolve_router_messages_payload_column(table_columns)
+        if not tracking_column or not payload_column:
             return {}
 
         order_column = _resolve_router_messages_order_column(table_columns)
-        order_sql = f"ORDER BY tracking_number ASC, {order_column} DESC" if order_column else "ORDER BY tracking_number ASC"
+        order_sql = f"ORDER BY {tracking_column} ASC, {order_column} DESC" if order_column else f"ORDER BY {tracking_column} ASC"
 
         with conn.cursor() as cur:
             chunk_size = 500
@@ -400,10 +553,10 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
                 chunk = tracking_ids_clean[i : i + chunk_size]
                 placeholders = ", ".join(["%s"] * len(chunk))
                 sql = f"""
-                    SELECT tracking_number, router_messages
+                    SELECT {tracking_column} AS tracking_number, {payload_column} AS router_messages
                     FROM {table_name}
-                    WHERE tracking_number IN ({placeholders})
-                    AND router_messages IS NOT NULL
+                    WHERE {tracking_column} IN ({placeholders})
+                    AND {payload_column} IS NOT NULL
                     {order_sql}
                 """
                 cur.execute(sql, chunk)
