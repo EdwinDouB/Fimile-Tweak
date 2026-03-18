@@ -1381,8 +1381,9 @@ def build_layout_specific_report_payload(kpi_payload: dict[str, Any], layout_mod
     }
 
 
-def _render_optional_dataframe(df: pd.DataFrame, show_details: bool, empty_message: str, hidden_message: str, *, use_container_width: bool = True, hide_index: bool = False) -> None:
-    if df.empty:
+def _render_optional_dataframe(df: Any, show_details: bool, empty_message: str, hidden_message: str, *, use_container_width: bool = True, hide_index: bool = False) -> None:
+    source_df = df.data if hasattr(df, "data") and isinstance(df.data, pd.DataFrame) else df
+    if isinstance(source_df, pd.DataFrame) and source_df.empty:
         st.info(empty_message)
         return
     if show_details:
