@@ -278,6 +278,16 @@ def _merge_route_meta(base: dict[str, str], incoming: dict[str, Any]) -> dict[st
     return merged
 
 
+def _route_name_fallback_meta(route_name: str) -> dict[str, str]:
+    parsed = parse_route_identity(route_name)
+    return {
+        "route_name": str(route_name or "").strip(),
+        "driver": str(parsed.get("Driver") or "").strip(),
+        "contractor": str(parsed.get("Contractor") or "").strip(),
+        "hub": str(parsed.get("Hub") or "").strip(),
+    }
+
+
 def _extract_assignee_records(payload: Any) -> list[dict[str, str]]:
     records: list[dict[str, str]] = []
 
@@ -351,16 +361,17 @@ def build_route_metadata_map(router_messages_map: dict[str, Any]) -> dict[str, d
 
             evt_type = event_type(event)
             route_name = extract_route_name_from_event(event)
-            assignee_id = extract_list_assignee_id(event) if evt_type in {"success", "fail"} else ""
+            assignee_id = extract_list_assignee_id(event)
+
+            incoming_meta: dict[str, str] = {
+                "route_name": route_name if evt_type == "out-for-delivery" else "",
+                "listAssigneeId": assignee_id,
+            }
+            if route_name:
+                incoming_meta = _merge_route_meta(incoming_meta, _route_name_fallback_meta(route_name))
 
             current = route_metadata_map.get(route_id, _normalize_route_meta_entry())
-            route_metadata_map[route_id] = _merge_route_meta(
-                current,
-                {
-                    "route_name": route_name if evt_type == "out-for-delivery" else "",
-                    "listAssigneeId": assignee_id,
-                },
-            )
+            route_metadata_map[route_id] = _merge_route_meta(current, incoming_meta)
 
             resolved_assignee_id = route_metadata_map[route_id].get("listAssigneeId", "")
             if resolved_assignee_id and (
@@ -399,8 +410,10 @@ def resolve_route_metadata_for_event(
     assignee_id = extract_list_assignee_id(event)
 
     resolved = _normalize_route_meta_entry(route_metadata_map.get(route_id) if route_metadata_map and route_id else None)
-    if route_name and not resolved.get("route_name"):
-        resolved["route_name"] = route_name
+    if route_name:
+        resolved = _merge_route_meta(resolved, _route_name_fallback_meta(route_name))
+        if not resolved.get("route_name"):
+            resolved["route_name"] = route_name
     if assignee_id and not resolved.get("listAssigneeId"):
         resolved["listAssigneeId"] = assignee_id
     resolved["listRouteId"] = route_id
@@ -1321,6 +1334,19 @@ def build_row(
             if normalized_name and normalized_name.lower() not in seen_route_names:
                 seen_route_names.add(normalized_name.lower())
                 route_names.append(normalized_name)
+
+    if not contractors:
+        fallback_contractor = str(structured_identity.get("Contractor") or "").strip()
+        if fallback_contractor:
+            contractors.append(fallback_contractor)
+    if not drivers:
+        fallback_driver = str(structured_identity.get("Driver") or "").strip()
+        if fallback_driver:
+            drivers.append(fallback_driver)
+    if not hubs:
+        fallback_hub = str(structured_identity.get("Hub") or "").strip()
+        if fallback_hub:
+            hubs.append(fallback_hub)
 
     primary_hub = hubs[0] if hubs else ""
     route_type = str(structured_identity.get("Route_type") or "delivery").strip()
