@@ -9,6 +9,8 @@ import pandas as pd
 import io 
 from xlsxwriter.utility import xl_col_to_name
 
+WEIGHT_DISTRIBUTION_START_ROW = 100
+
 
 def _resolve_ofd_column(df: pd.DataFrame) -> str:
     if "first_out_for_delivery_date" in df.columns:
@@ -1136,7 +1138,7 @@ def kpi_report_to_excel_bytes(
             overview_ws = workbook.add_worksheet("overview")
             overview_table = _build_detailed_overview_table(detail_df, source_df=source_df)
             _style_overview_worksheet(overview_ws, overview_table, 0, workbook)
-            next_row = len(overview_table) + 3
+            next_row = max(len(overview_table) + 3, WEIGHT_DISTRIBUTION_START_ROW)
             if source_df is not None and not source_df.empty:
                 overview_weight_charts: list[dict[str, Any]] = []
                 next_row = _write_weight_distribution_section(
@@ -1201,7 +1203,7 @@ def kpi_report_to_excel_bytes(
                 sheet_name = _sanitize_sheet_name(f"HUB_{hub_name}")
                 hub_ws = workbook.add_worksheet(sheet_name)
                 _style_overview_worksheet(hub_ws, hub_table, 0, workbook)
-                hub_next_row = len(hub_table) + 3
+                hub_next_row = max(len(hub_table) + 3, WEIGHT_DISTRIBUTION_START_ROW)
                 hub_weight_charts: list[dict[str, Any]] = []
                 hub_next_row = _write_weight_distribution_section(
                     hub_ws,
