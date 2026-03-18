@@ -1468,6 +1468,7 @@ def process_tracking_ids(
     receive_province_map: dict[str, str],
     sender_info_map: dict[str, dict[str, str]],
     router_messages_map: dict[str, Any],
+    route_metadata_map: dict[str, dict[str, str]],
     progress_bar,
     status_text,
     progress_start: float = 0.0,
@@ -1493,7 +1494,7 @@ def process_tracking_ids(
             normalized_payload = _normalize_router_payload(payload)
 
             if isinstance(normalized_payload, (dict, list)):
-                row = build_row(tracking_id, normalized_payload)
+                row = build_row(tracking_id, normalized_payload, route_metadata_map=route_metadata_map)
                 return tracking_id, row, None
 
             row = empty_row(tracking_id)
@@ -1776,10 +1777,11 @@ def main() -> None:
         receive_province_map: dict[str, str] = {}
         sender_info_map: dict[str, dict[str, str]] = {}
         router_messages_map: dict[str, Any] = {}
+        route_metadata_map: dict[str, dict[str, str]] = {}
         progress = st.progress(0)
         status = st.empty()
 
-        setup_steps = 3
+        setup_steps = 4
         completed_setup_steps = 0
 
         def update_setup_progress(message: str) -> None:
@@ -1807,6 +1809,14 @@ def main() -> None:
             update_setup_progress("Loading route event payloads...")
 
         try:
+            route_metadata_map = build_route_metadata_map(router_messages_map)
+        except Exception as e:
+            st.warning(f"Failed to build route metadata cache: {e}")
+            route_metadata_map = {}
+        finally:
+            update_setup_progress("Building route/assignee cache...")
+
+        try:
             receive_province_map, sender_info_map = _extract_address_maps_from_router_payload(
                 dedup_ids,
                 router_messages_map,
@@ -1824,6 +1834,7 @@ def main() -> None:
             receive_province_map=receive_province_map,
             sender_info_map=sender_info_map,
             router_messages_map=router_messages_map,
+            route_metadata_map=route_metadata_map,
             progress_bar=progress,
             status_text=status,
             progress_start=0.3,

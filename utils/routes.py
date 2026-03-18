@@ -5,6 +5,7 @@ import os
 import io 
 import re 
 import json
+import requests
 
 from utils.utils import *
 from utils.constants import * 
@@ -91,6 +92,11 @@ KNOWN_DSP_CONTRACTORS = [
     "FNM",
 ]
 
+ASSIGNEE_API_URL = read_config(
+    "KPI_ASSIGNEE_API_URL",
+    "https://isp.beans.ai/enterprise/v1/lists/assignees",
+)
+
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
@@ -126,10 +132,79 @@ def parse_route(description: Any) -> str:
         return match.group(1).strip("\"' \t-:：")
     return ""
 
+
+def _event_containers(event: dict[str, Any]) -> list[dict[str, Any]]:
+    containers: list[dict[str, Any]] = []
+    for candidate in (event, event.get("logItem"), event.get("log")):
+        if isinstance(candidate, dict):
+            containers.append(candidate)
+    return containers
+
+
+def _first_non_empty_dict_value(container: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = container.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def extract_list_route_id(event: dict[str, Any]) -> str:
+    for container in _event_containers(event):
+        route_obj = container.get("route")
+        if isinstance(route_obj, dict):
+            route_id = _first_non_empty_dict_value(route_obj, "listRouteId", "routeId", "id")
+            if route_id:
+                return route_id
+
+        route_id = _first_non_empty_dict_value(container, "listRouteId", "routeId")
+        if route_id:
+            return route_id
+    return ""
+
+
+def extract_list_assignee_id(event: dict[str, Any]) -> str:
+    for container in _event_containers(event):
+        assignee_obj = container.get("assignee")
+        if isinstance(assignee_obj, dict):
+            assignee_id = _first_non_empty_dict_value(assignee_obj, "listAssigneeId", "assigneeId", "id")
+            if assignee_id:
+                return assignee_id
+
+        assignee_id = _first_non_empty_dict_value(container, "listAssigneeId", "assigneeId")
+        if assignee_id:
+            return assignee_id
+    return ""
+
+
+def extract_route_name_from_event(event: dict[str, Any]) -> str:
+    for container in _event_containers(event):
+        route_name = parse_route(container.get("description"))
+        if route_name:
+            return route_name
+
+        route_obj = container.get("route")
+        if isinstance(route_obj, dict):
+            route_name = _first_non_empty_dict_value(route_obj, "name", "routeName", "listRouteName")
+            if route_name:
+                return route_name
+        elif isinstance(route_obj, str):
+            route_name = str(route_obj).strip()
+            if route_name:
+                return route_name
+
+        route_name = _first_non_empty_dict_value(container, "routeName", "listRouteName")
+        if route_name:
+            return route_name
+    return ""
+
 def latest_route_assignment(events: list[dict[str, Any]]) -> str:
     candidates: list[tuple[int, int, str, bool]] = []
     for idx, event in enumerate(events):
-        route_name = parse_route(event_description(event))
+        route_name = extract_route_name_from_event(event)
         if not route_name:
             continue
 
@@ -155,7 +230,7 @@ def extract_all_route_assignments(events: list[dict[str, Any]]) -> list[str]:
     routes: list[str] = []
     seen: set[str] = set()
     for event in events:
-        route_name = parse_route(event_description(event))
+        route_name = extract_route_name_from_event(event)
         normalized = route_name.strip()
         if not normalized:
             continue
@@ -178,6 +253,160 @@ def choose_primary_route(ofd_route: str, failed_route: str, success_route: str, 
         if candidate:
             return candidate
     return ""
+
+
+def _normalize_route_meta_entry(entry: dict[str, Any] | None = None) -> dict[str, str]:
+    source = entry or {}
+    return {
+        "route_name": str(source.get("route_name") or "").strip(),
+        "listAssigneeId": str(source.get("listAssigneeId") or "").strip(),
+        "driver": str(source.get("driver") or "").strip(),
+        "contractor": str(source.get("contractor") or "").strip(),
+        "hub": str(source.get("hub") or "").strip(),
+        "listWarehouseId": str(source.get("listWarehouseId") or "").strip(),
+    }
+
+
+def _merge_route_meta(base: dict[str, str], incoming: dict[str, Any]) -> dict[str, str]:
+    merged = _normalize_route_meta_entry(base)
+    for key in ("route_name", "listAssigneeId", "driver", "contractor", "hub", "listWarehouseId"):
+        value = str(incoming.get(key) or "").strip()
+        if value and not merged.get(key):
+            merged[key] = value
+    if merged.get("listWarehouseId") and not merged.get("hub"):
+        merged["hub"] = merged["listWarehouseId"]
+    return merged
+
+
+def _extract_assignee_records(payload: Any) -> list[dict[str, str]]:
+    records: list[dict[str, str]] = []
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            assignee_id = _first_non_empty(
+                node.get("id"),
+                node.get("listAssigneeId"),
+                node.get("assigneeId"),
+            )
+            if assignee_id:
+                name = _first_non_empty(node.get("name"), node.get("assigneeName"))
+                contractor = _first_non_empty(node.get("contractor"), node.get("company"), node.get("vendor"))
+                warehouse_id = _first_non_empty(
+                    node.get("listWarehouseId"),
+                    node.get("warehouseId"),
+                )
+                if name or contractor or warehouse_id:
+                    records.append(
+                        {
+                            "listAssigneeId": assignee_id,
+                            "driver": name,
+                            "contractor": contractor,
+                            "listWarehouseId": warehouse_id,
+                            "hub": warehouse_id,
+                        }
+                    )
+            for value in node.values():
+                _walk(value)
+            return
+
+        if isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(payload)
+    return records
+
+
+def _load_assignee_cache(assignee_ids: set[str]) -> dict[str, dict[str, str]]:
+    if not assignee_ids or not ASSIGNEE_API_URL:
+        return {}
+
+    headers = build_api_headers()
+    response = requests.get(ASSIGNEE_API_URL, headers=headers, timeout=API_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    payload = response.json()
+    assignee_cache: dict[str, dict[str, str]] = {}
+    for record in _extract_assignee_records(payload):
+        assignee_id = str(record.get("listAssigneeId") or "").strip()
+        if not assignee_id or assignee_id not in assignee_ids:
+            continue
+        assignee_cache[assignee_id] = _merge_route_meta({}, record)
+    return assignee_cache
+
+
+def build_route_metadata_map(router_messages_map: dict[str, Any]) -> dict[str, dict[str, str]]:
+    route_metadata_map: dict[str, dict[str, str]] = {}
+    needed_assignee_ids: set[str] = set()
+
+    for payload in router_messages_map.values():
+        events = normalize_events(payload)
+        if not events:
+            continue
+
+        for event in events:
+            route_id = extract_list_route_id(event)
+            if not route_id:
+                continue
+
+            evt_type = event_type(event)
+            route_name = extract_route_name_from_event(event)
+            assignee_id = extract_list_assignee_id(event) if evt_type in {"success", "fail"} else ""
+
+            current = route_metadata_map.get(route_id, _normalize_route_meta_entry())
+            route_metadata_map[route_id] = _merge_route_meta(
+                current,
+                {
+                    "route_name": route_name if evt_type == "out-for-delivery" else "",
+                    "listAssigneeId": assignee_id,
+                },
+            )
+
+            resolved_assignee_id = route_metadata_map[route_id].get("listAssigneeId", "")
+            if resolved_assignee_id and (
+                not route_metadata_map[route_id].get("driver")
+                or not route_metadata_map[route_id].get("contractor")
+                or not route_metadata_map[route_id].get("hub")
+            ):
+                needed_assignee_ids.add(resolved_assignee_id)
+
+    if not needed_assignee_ids:
+        return route_metadata_map
+
+    try:
+        assignee_cache = _load_assignee_cache(needed_assignee_ids)
+    except Exception:
+        assignee_cache = {}
+
+    for route_id, route_meta in list(route_metadata_map.items()):
+        assignee_id = route_meta.get("listAssigneeId", "")
+        if not assignee_id:
+            continue
+        assignee_meta = assignee_cache.get(assignee_id)
+        if not assignee_meta:
+            continue
+        route_metadata_map[route_id] = _merge_route_meta(route_meta, assignee_meta)
+
+    return route_metadata_map
+
+
+def resolve_route_metadata_for_event(
+    event: dict[str, Any],
+    route_metadata_map: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str]:
+    route_id = extract_list_route_id(event)
+    route_name = extract_route_name_from_event(event)
+    assignee_id = extract_list_assignee_id(event)
+
+    resolved = _normalize_route_meta_entry(route_metadata_map.get(route_id) if route_metadata_map and route_id else None)
+    if route_name and not resolved.get("route_name"):
+        resolved["route_name"] = route_name
+    if assignee_id and not resolved.get("listAssigneeId"):
+        resolved["listAssigneeId"] = assignee_id
+    resolved["listRouteId"] = route_id
+    if resolved.get("listWarehouseId") and not resolved.get("hub"):
+        resolved["hub"] = resolved["listWarehouseId"]
+    return resolved
 
 
 
@@ -834,7 +1063,11 @@ def legacy_is_pod_compliant_for_event(event: dict[str, Any] | None, payload: Any
     return False
 
 
-def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def build_intervals(
+    events: list[dict[str, Any]],
+    payload: dict[str, Any] | None = None,
+    route_metadata_map: dict[str, dict[str, str]] | None = None,
+) -> list[dict[str, Any]]:
     intervals: list[dict[str, Any]] = []
 
     def interval_ts(event: dict[str, Any]) -> int | None:
@@ -881,10 +1114,18 @@ def build_intervals(events: list[dict[str, Any]], payload: dict[str, Any] | None
             if sort_desc:
                 node["description"] = sort_desc
 
+        route_meta = resolve_route_metadata_for_event(event, route_metadata_map=route_metadata_map)
+
         if evt_type in {"fail", "failed", "failure", "out-for-delivery", "ofd", "outfordelivery", "success", "delivered"}:
-            route = parse_route(description)
+            route = str(route_meta.get("route_name") or "").strip()
             if route:
                 node["route"] = route
+            route_id = str(route_meta.get("listRouteId") or "").strip()
+            if route_id:
+                node["listRouteId"] = route_id
+            assignee_id = str(route_meta.get("listAssigneeId") or "").strip()
+            if assignee_id:
+                node["listAssigneeId"] = assignee_id
 
         if evt_type in {"fail", "failed", "failure", "success", "delivered"}:
             node["POD"] = is_pod_compliant_for_event(event, payload=payload)
@@ -1001,9 +1242,13 @@ def infer_hub_from_pre_ofd_scan(events: list[dict[str, Any]], ofd_evt: dict[str,
     return extract_hub_from_scan_description(event_description(target_evt))
 
 
-def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
+def build_row(
+    tracking_id: str,
+    payload: Any,
+    route_metadata_map: dict[str, dict[str, str]] | None = None,
+) -> dict[str, str]:
     events = normalize_events(payload)
-    intervals = build_intervals(events, payload=payload)
+    intervals = build_intervals(events, payload=payload, route_metadata_map=route_metadata_map)
     is_delivered = any(str(x.get("type") or "").strip().lower() in {"success", "delivered"} for x in intervals)
 
     first_scanned_interval = next(
@@ -1023,13 +1268,8 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
     fail_events = events_by_predicate(events, lambda e: event_type(e) in {"fail", "failed", "failure"})
     success_events = events_by_predicate(events, lambda e: event_type(e) in {"success", "delivered"})
 
-    ofd_evt = ofd_events[0] if ofd_events else None
-    warehouse_hub = infer_hub_from_pre_ofd_warehouse(events, ofd_evt)
-    scan_hub = infer_hub_from_pre_ofd_scan(events, ofd_evt)
-    payload_scan_hub = extract_hub_from_scanned_at_payload(payload)
     fail_evt = fail_events[0] if fail_events else None
     success_evt = success_events[0] if success_events else None
-    latest_route = latest_route_assignment(events)
     route_assignments = extract_all_route_assignments(events)
     
     created_time_ms = None
@@ -1050,28 +1290,46 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
     route_names: list[str] = []
     contractors: list[str] = []
     drivers: list[str] = []
+    hubs: list[str] = []
     seen_route_names: set[str] = set()
     seen_contractors: set[str] = set()
     seen_drivers: set[str] = set()
+    seen_hubs: set[str] = set()
 
     for event in ofd_events:
-        route_name = parse_route(event_description(event)).strip()
+        route_meta = resolve_route_metadata_for_event(event, route_metadata_map=route_metadata_map)
+        route_name = str(route_meta.get("route_name") or "").strip()
         if route_name and route_name.lower() not in seen_route_names:
             seen_route_names.add(route_name.lower())
             route_names.append(route_name)
-        route_info = parse_route_identity(route_name) if route_name else {}
-        contractor_name = str(route_info.get("Contractor") or "").strip()
+        contractor_name = str(route_meta.get("contractor") or "").strip()
         if contractor_name and contractor_name.lower() not in seen_contractors:
             seen_contractors.add(contractor_name.lower())
             contractors.append(contractor_name)
-        driver_name = str(route_info.get("Driver") or "").strip()
+        driver_name = str(route_meta.get("driver") or "").strip()
         if driver_name and driver_name.lower() not in seen_drivers:
             seen_drivers.add(driver_name.lower())
             drivers.append(driver_name)
+        hub_name = str(route_meta.get("hub") or "").strip()
+        if hub_name and hub_name.lower() not in seen_hubs:
+            seen_hubs.add(hub_name.lower())
+            hubs.append(hub_name)
+
+    if not route_names:
+        for route_name in route_assignments:
+            normalized_name = str(route_name or "").strip()
+            if normalized_name and normalized_name.lower() not in seen_route_names:
+                seen_route_names.add(normalized_name.lower())
+                route_names.append(normalized_name)
+
+    primary_hub = hubs[0] if hubs else ""
+    route_type = str(structured_identity.get("Route_type") or "delivery").strip()
+    if primary_hub.upper() == "PU":
+        route_type = "pickup"
 
     row: dict[str, str] = {
         "tracking_id": tracking_id,
-        "Hub": str(warehouse_hub or scan_hub or payload_scan_hub or "").strip(),
+        "Hub": primary_hub,
         "Contractors": json.dumps(contractors, ensure_ascii=False),
         "Drivers": json.dumps(drivers, ensure_ascii=False),
         "Route_names": json.dumps(route_names, ensure_ascii=False),
@@ -1082,7 +1340,7 @@ def build_row(tracking_id: str, payload: Any) -> dict[str, str]:
         "delivered_time": fmt_dt(delivered_time),
         "entered_costomer_service": "",
         "beans_pod_link": build_beans_tracking_link(tracking_id),
-        "Route_type": str(structured_identity.get("Route_type") or "delivery").strip(),
+        "Route_type": route_type,
         "Intervals": json.dumps(intervals, ensure_ascii=False),
         "Is_delivered": "true" if is_delivered else "false",
     }
@@ -1189,7 +1447,6 @@ def extract_route_identity_from_payload(payload: dict[str, Any]) -> dict[str, st
     route_name = _first_non_empty(
         *(_find_values_by_key(payload, "routeName", limit=2)),
         *(_find_values_by_key(payload, "listRouteName", limit=2)),
-        *(_find_values_by_key(payload, "route", limit=2)),
     )
 
     fallback = parse_route_identity(route_name, fallback_state="") if route_name else {"Hub": "", "Contractor": "", "Driver": "", "Route_type": ""}
@@ -1307,12 +1564,11 @@ def fill_route_identity_columns(df: pd.DataFrame) -> pd.DataFrame:
         route_info = parse_route_identity(route_name, fallback_state=fallback_state)
         df.at[idx, "Route_name"] = route_name
         existing_driver = str(row.get("Driver") or "").strip()
-        df.at[idx, "Driver"] = existing_driver or route_info["Driver"]
-        fallback_hub = normalize_hub_name(row.get("Hub") or "", fallback_state=fallback_state)
-        parsed_hub = normalize_hub_name(route_info["Hub"], fallback_state=fallback_state)
-        df.at[idx, "Hub"] = fallback_hub or parsed_hub
+        df.at[idx, "Driver"] = existing_driver
+        existing_hub = str(row.get("Hub") or "").strip()
+        df.at[idx, "Hub"] = existing_hub
         existing_contractor = str(row.get("Contractor") or "").strip()
-        df.at[idx, "Contractor"] = existing_contractor or route_info["Contractor"]
+        df.at[idx, "Contractor"] = existing_contractor
         existing_route_type = str(row.get("Route_type") or "").strip()
         df.at[idx, "Route_type"] = existing_route_type or route_info["Route_type"]
     return df
