@@ -1862,10 +1862,6 @@ def _normalize_router_payload(payload: Any) -> Any:
     except json.JSONDecodeError:
         return payload
 
-
-def normalize_router_messages_map(router_messages_map: dict[str, Any]) -> dict[str, Any]:
-    return {tracking_id: _normalize_router_payload(payload) for tracking_id, payload in router_messages_map.items()}
-
 def _parse_address_components(full_address: Any) -> dict[str, str]:
     """Parse a full US-style address into address/state/city components."""
     address = str(full_address or "").strip()
@@ -1954,6 +1950,60 @@ def _extract_address_maps_from_router_payload(
             "sender_city": sender_parts["city"],
             "sender_address": sender_parts["address"],
         }
+
+    return receive_province_map, sender_info_map
+
+
+def _has_sender_info_value(sender_info: dict[str, str] | None) -> bool:
+    if not isinstance(sender_info, dict):
+        return False
+    return any(str(sender_info.get(key) or "").strip() for key in ("sender_company", "sender_province", "sender_city", "sender_address"))
+
+
+def _load_address_maps_with_db_fallback(
+    dedup_ids: list[str],
+    router_messages_map: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    receive_province_map: dict[str, str] = {}
+    sender_info_map: dict[str, dict[str, str]] = {}
+
+    tracking_ids_tuple = tuple(dedup_ids)
+    db_receive_fn = getattr(db, "fetch_receive_province_map", None)
+    db_sender_fn = getattr(db, "fetch_sender_info_map", None)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_receive = executor.submit(db_receive_fn, tracking_ids_tuple) if callable(db_receive_fn) else None
+        future_sender = executor.submit(db_sender_fn, tracking_ids_tuple) if callable(db_sender_fn) else None
+
+        if future_receive is not None:
+            receive_province_map = future_receive.result() or {}
+        if future_sender is not None:
+            sender_info_map = future_sender.result() or {}
+
+    missing_tracking_ids = [
+        tracking_id
+        for tracking_id in dedup_ids
+        if not str(receive_province_map.get(tracking_id) or "").strip()
+        or not _has_sender_info_value(sender_info_map.get(tracking_id))
+    ]
+    if not missing_tracking_ids:
+        return receive_province_map, sender_info_map
+
+    payload_receive_map, payload_sender_map = _extract_address_maps_from_router_payload(missing_tracking_ids, router_messages_map)
+
+    for tracking_id, state in payload_receive_map.items():
+        if tracking_id not in receive_province_map or not str(receive_province_map.get(tracking_id) or "").strip():
+            receive_province_map[tracking_id] = state
+
+    for tracking_id in missing_tracking_ids:
+        current_sender = sender_info_map.get(tracking_id, {})
+        payload_sender = payload_sender_map.get(tracking_id, {})
+        if not _has_sender_info_value(current_sender) and payload_sender:
+            sender_info_map[tracking_id] = payload_sender
+        elif current_sender:
+            sender_info_map[tracking_id] = current_sender
+        elif payload_sender:
+            sender_info_map[tracking_id] = payload_sender
 
     return receive_province_map, sender_info_map
 
@@ -2132,11 +2182,11 @@ def main() -> None:
             _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.30, tr("task_step_router_messages"))
             fetch_router_messages = getattr(db, "fetch_router_messages_map", None)
             if callable(fetch_router_messages):
-                router_messages_map = normalize_router_messages_map(fetch_router_messages(tuple(dedup_ids)))
+                router_messages_map = fetch_router_messages(tuple(dedup_ids))
             else:
                 fallback_fetch_router_messages = globals().get("fetch_router_messages_map")
                 if callable(fallback_fetch_router_messages):
-                    router_messages_map = normalize_router_messages_map(fallback_fetch_router_messages(tuple(dedup_ids)))
+                    router_messages_map = fallback_fetch_router_messages(tuple(dedup_ids))
                 else:
                     raise AttributeError(
                         f"module 'utils.db' has no attribute 'fetch_router_messages_map' (loaded from {getattr(db, '__file__', 'unknown')})"
@@ -2154,7 +2204,7 @@ def main() -> None:
 
         try:
             _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.52, tr("task_step_receiver_data"))
-            receive_province_map, sender_info_map = _extract_address_maps_from_router_payload(
+            receive_province_map, sender_info_map = _load_address_maps_with_db_fallback(
                 dedup_ids,
                 router_messages_map,
             )
@@ -2476,7 +2526,11 @@ def main() -> None:
         csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
         report_payload = build_layout_specific_report_payload(kpi_payload, layout_mode)
         kpi_report_data = None
-        export_route_attempts_df, _, _, _ = build_route_attempts_view(export_base_df)
+        export_route_attempts_df = route_attempts_df.copy()
+        if st.session_state.get("exclude_atl_wdr", True) and not export_route_attempts_df.empty and "Hub" in export_route_attempts_df.columns:
+            export_route_attempts_df = export_route_attempts_df[
+                ~export_route_attempts_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(["ATL", "WDR"])
+            ].copy()
         export_route_attempts_df = _filter_df_by_datetime_window(
             export_route_attempts_df,
             "finish_time",
