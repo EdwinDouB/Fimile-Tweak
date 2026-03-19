@@ -392,21 +392,68 @@ def fetch_router_messages_map(tracking_ids: tuple[str, ...]) -> dict[str, Any]:
             return {}
 
         order_column = _resolve_router_messages_order_column(table_columns)
-        order_sql = f"ORDER BY tracking_number ASC, {order_column} DESC" if order_column else "ORDER BY tracking_number ASC"
+        tie_breaker_column = "id" if "id" in table_columns else ""
 
         with conn.cursor() as cur:
             chunk_size = 500
             for i in range(0, len(tracking_ids_clean), chunk_size):
                 chunk = tracking_ids_clean[i : i + chunk_size]
                 placeholders = ", ".join(["%s"] * len(chunk))
-                sql = f"""
-                    SELECT tracking_number, router_messages
-                    FROM {table_name}
-                    WHERE tracking_number IN ({placeholders})
-                    AND router_messages IS NOT NULL
-                    {order_sql}
-                """
-                cur.execute(sql, chunk)
+                params: list[Any] = list(chunk)
+
+                if order_column:
+                    latest_order_subquery = f"""
+                        SELECT tracking_number, MAX({order_column}) AS latest_order
+                        FROM {table_name}
+                        WHERE tracking_number IN ({placeholders})
+                        AND router_messages IS NOT NULL
+                        GROUP BY tracking_number
+                    """
+
+                    if tie_breaker_column and tie_breaker_column != order_column:
+                        sql = f"""
+                            SELECT base.tracking_number, base.router_messages
+                            FROM {table_name} AS base
+                            INNER JOIN ({latest_order_subquery}) AS latest
+                                ON latest.tracking_number = base.tracking_number
+                                AND latest.latest_order = base.{order_column}
+                            INNER JOIN (
+                                SELECT tracking_number, {order_column} AS latest_order, MAX({tie_breaker_column}) AS latest_tie_breaker
+                                FROM {table_name}
+                                WHERE tracking_number IN ({placeholders})
+                                AND router_messages IS NOT NULL
+                                GROUP BY tracking_number, {order_column}
+                            ) AS tie_breaker
+                                ON tie_breaker.tracking_number = base.tracking_number
+                                AND tie_breaker.latest_order = base.{order_column}
+                                AND tie_breaker.latest_tie_breaker = base.{tie_breaker_column}
+                            WHERE base.tracking_number IN ({placeholders})
+                            AND base.router_messages IS NOT NULL
+                            ORDER BY base.tracking_number ASC
+                        """
+                        params = [*chunk, *chunk, *chunk]
+                    else:
+                        sql = f"""
+                            SELECT base.tracking_number, base.router_messages
+                            FROM {table_name} AS base
+                            INNER JOIN ({latest_order_subquery}) AS latest
+                                ON latest.tracking_number = base.tracking_number
+                                AND latest.latest_order = base.{order_column}
+                            WHERE base.tracking_number IN ({placeholders})
+                            AND base.router_messages IS NOT NULL
+                            ORDER BY base.tracking_number ASC
+                        """
+                        params = [*chunk, *chunk]
+                else:
+                    sql = f"""
+                        SELECT tracking_number, router_messages
+                        FROM {table_name}
+                        WHERE tracking_number IN ({placeholders})
+                        AND router_messages IS NOT NULL
+                        ORDER BY tracking_number ASC
+                    """
+
+                cur.execute(sql, params)
 
                 while True:
                     rows = cur.fetchmany(DB_FETCH_BATCH_SIZE)

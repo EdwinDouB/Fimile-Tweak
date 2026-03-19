@@ -97,6 +97,11 @@ ASSIGNEE_API_URL = read_config(
     "KPI_ASSIGNEE_API_URL",
     "https://isp.beans.ai/enterprise/v1/lists/assignees",
 )
+ASSIGNEE_CACHE_DIR = read_config("KPI_ASSIGNEE_CACHE_DIR", ".cache")
+ASSIGNEE_CACHE_FILE = read_config(
+    "KPI_ASSIGNEE_CACHE_FILE",
+    os.path.join(ASSIGNEE_CACHE_DIR, "assignee_list_response.json"),
+)
 
 def build_export_df(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
@@ -328,15 +333,40 @@ def _extract_assignee_records(payload: Any) -> list[dict[str, str]]:
     return records
 
 
-def _load_assignee_cache(assignee_ids: set[str]) -> dict[str, dict[str, str]]:
-    if not assignee_ids or not ASSIGNEE_API_URL:
-        return {}
+def load_assignee_payload_cached(force_refresh: bool = False) -> Any:
+    cache_file = str(ASSIGNEE_CACHE_FILE or "").strip()
+    if not cache_file:
+        return None
+
+    if not force_refresh and os.path.exists(cache_file):
+        try:
+            with open(cache_file, "r", encoding="utf-8") as fp:
+                return json.load(fp)
+        except Exception:
+            pass
+
+    if not ASSIGNEE_API_URL:
+        return None
 
     headers = build_api_headers()
     response = requests.get(ASSIGNEE_API_URL, headers=headers, timeout=API_TIMEOUT_SECONDS)
     response.raise_for_status()
-
     payload = response.json()
+
+    os.makedirs(os.path.dirname(cache_file) or ".", exist_ok=True)
+    with open(cache_file, "w", encoding="utf-8") as fp:
+        json.dump(payload, fp, ensure_ascii=False)
+    return payload
+
+
+def _load_assignee_cache(assignee_ids: set[str], assignee_payload: Any | None = None) -> dict[str, dict[str, str]]:
+    if not assignee_ids:
+        return {}
+
+    payload = assignee_payload
+    if payload is None:
+        payload = load_assignee_payload_cached()
+
     assignee_cache: dict[str, dict[str, str]] = {}
     for record in _extract_assignee_records(payload):
         assignee_id = str(record.get("listAssigneeId") or "").strip()
@@ -346,7 +376,10 @@ def _load_assignee_cache(assignee_ids: set[str]) -> dict[str, dict[str, str]]:
     return assignee_cache
 
 
-def build_route_metadata_map(router_messages_map: dict[str, Any]) -> dict[str, dict[str, str]]:
+def build_route_metadata_map(
+    router_messages_map: dict[str, Any],
+    assignee_payload: Any | None = None,
+) -> dict[str, dict[str, str]]:
     route_metadata_map: dict[str, dict[str, str]] = {}
     needed_assignee_ids: set[str] = set()
 
@@ -386,7 +419,7 @@ def build_route_metadata_map(router_messages_map: dict[str, Any]) -> dict[str, d
         return route_metadata_map
 
     try:
-        assignee_cache = _load_assignee_cache(needed_assignee_ids)
+        assignee_cache = _load_assignee_cache(needed_assignee_ids, assignee_payload=assignee_payload)
     except Exception:
         assignee_cache = {}
 
@@ -1260,6 +1293,7 @@ def build_row(
     tracking_id: str,
     payload: Any,
     route_metadata_map: dict[str, dict[str, str]] | None = None,
+    include_dimensions: bool = True,
 ) -> dict[str, str]:
     events = normalize_events(payload)
     intervals = build_intervals(events, payload=payload, route_metadata_map=route_metadata_map)
@@ -1360,8 +1394,8 @@ def build_row(
         "Contractors": json.dumps(contractors, ensure_ascii=False),
         "Drivers": json.dumps(drivers, ensure_ascii=False),
         "Route_names": json.dumps(route_names, ensure_ascii=False),
-        "Weight": _extract_weight_from_payload(payload),
-        "Volume": _extract_volume_from_payload(payload),
+        "Weight": _extract_weight_from_payload(payload) if include_dimensions else "",
+        "Volume": _extract_volume_from_payload(payload) if include_dimensions else "",
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
         "last_scanned_time": fmt_dt(to_local_dt(intervals[-1].get("time") if intervals else None)),

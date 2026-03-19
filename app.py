@@ -4,6 +4,7 @@ import ast
 import io
 import json
 import re
+import time as pytime
 
 import utils.db as db
 import utils.report as report_utils
@@ -16,6 +17,129 @@ from utils.constants import *
 
 import pandas as pd
 import streamlit as st
+
+
+def _init_task_progress_ui(task_key: str, title: str) -> tuple[Any, Any, Any, float]:
+    container = st.container()
+    with container:
+        st.markdown(f"**{title}**")
+        progress_bar = st.progress(0.0)
+        elapsed_placeholder = st.empty()
+        status_placeholder = st.empty()
+    started_at = pytime.perf_counter()
+    elapsed_placeholder.caption("Elapsed: 0.0 s" if st.session_state.get("language") == "en" else "已耗时：0.0 秒")
+    ready_text = tr("task_ready")
+    status_placeholder.caption(
+        f"Current step: {ready_text}" if st.session_state.get("language") == "en" else f"当前步骤：{ready_text}"
+    )
+    st.session_state[f"{task_key}_elapsed_seconds"] = 0.0
+    st.session_state[f"{task_key}_status"] = ready_text
+    return progress_bar, elapsed_placeholder, status_placeholder, started_at
+
+
+def _update_task_progress(
+    task_key: str,
+    progress_bar: Any,
+    elapsed_placeholder: Any,
+    status_placeholder: Any,
+    started_at: float,
+    progress_value: float,
+    status_text: str,
+) -> None:
+    normalized_progress = min(max(float(progress_value), 0.0), 1.0)
+    elapsed_seconds = max(0.0, pytime.perf_counter() - started_at)
+    progress_bar.progress(normalized_progress)
+    elapsed_placeholder.caption(
+        f"Elapsed: {elapsed_seconds:.1f} s" if st.session_state.get("language") == "en" else f"已耗时：{elapsed_seconds:.1f} 秒"
+    )
+    status_placeholder.caption(
+        f"Current step: {status_text}" if st.session_state.get("language") == "en" else f"当前步骤：{status_text}"
+    )
+    st.session_state[f"{task_key}_elapsed_seconds"] = elapsed_seconds
+    st.session_state[f"{task_key}_status"] = status_text
+
+
+def _finalize_task_progress(
+    task_key: str,
+    progress_bar: Any,
+    elapsed_placeholder: Any,
+    status_placeholder: Any,
+    started_at: float,
+    final_status: str,
+) -> None:
+    _update_task_progress(
+        task_key,
+        progress_bar,
+        elapsed_placeholder,
+        status_placeholder,
+        started_at,
+        1.0,
+        final_status,
+    )
+
+
+class _TaskStatusAdapter:
+    def __init__(
+        self,
+        task_key: str,
+        elapsed_placeholder: Any,
+        status_placeholder: Any,
+        started_at: float,
+    ) -> None:
+        self.task_key = task_key
+        self.elapsed_placeholder = elapsed_placeholder
+        self.status_placeholder = status_placeholder
+        self.started_at = started_at
+
+    def text(self, message: str) -> None:
+        elapsed_seconds = max(0.0, pytime.perf_counter() - self.started_at)
+        self.elapsed_placeholder.caption(
+            f"Elapsed: {elapsed_seconds:.1f} s" if st.session_state.get("language") == "en" else f"已耗时：{elapsed_seconds:.1f} 秒"
+        )
+        self.status_placeholder.caption(
+            f"Current step: {message}" if st.session_state.get("language") == "en" else f"当前步骤：{message}"
+        )
+        st.session_state[f"{self.task_key}_elapsed_seconds"] = elapsed_seconds
+        st.session_state[f"{self.task_key}_status"] = message
+
+
+def _enrich_route_attempts_with_pricing(
+    route_attempts_df: pd.DataFrame,
+    router_messages_map: dict[str, Any],
+    *,
+    include_bonus: bool,
+    progress_callback: Any | None = None,
+) -> pd.DataFrame:
+    enriched_df = route_attempts_df.copy()
+    if enriched_df.empty:
+        return apply_pricing_columns(enriched_df, include_bonus=include_bonus)
+
+    tracking_ids = (
+        enriched_df.get("tracking_id", pd.Series("", index=enriched_df.index))
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    total = len(enriched_df)
+
+    weights: list[str] = []
+    volumes: list[str] = []
+    for idx, tracking_id in enumerate(tracking_ids.tolist(), start=1):
+        payload = router_messages_map.get(tracking_id)
+        normalized_payload = _normalize_router_payload(payload)
+        if isinstance(normalized_payload, (dict, list)):
+            weights.append(_extract_weight_from_payload(normalized_payload))
+            volumes.append(_extract_volume_from_payload(normalized_payload))
+        else:
+            weights.append("")
+            volumes.append("")
+
+        if callable(progress_callback):
+            progress_callback(idx, total, tracking_id)
+
+    enriched_df["Weight"] = weights
+    enriched_df["Volume"] = volumes
+    return apply_pricing_columns(enriched_df, include_bonus=include_bonus)
 
 
 def _load_intervals(intervals_raw: Any) -> list[dict[str, Any]]:
@@ -1661,6 +1785,7 @@ def process_tracking_ids(
     status_text,
     progress_start: float = 0.0,
     progress_end: float = 1.0,
+    include_dimensions: bool = True,
 ) -> tuple[pd.DataFrame, list[dict[str, str]]]:
     rows_by_id: dict[str, dict[str, str]] = {}
     failures: list[dict[str, str]] = []
@@ -1682,7 +1807,12 @@ def process_tracking_ids(
             normalized_payload = _normalize_router_payload(payload)
 
             if isinstance(normalized_payload, (dict, list)):
-                row = build_row(tracking_id, normalized_payload, route_metadata_map=route_metadata_map)
+                row = build_row(
+                    tracking_id,
+                    normalized_payload,
+                    route_metadata_map=route_metadata_map,
+                    include_dimensions=include_dimensions,
+                )
                 return tracking_id, row, None
 
             row = empty_row(tracking_id)
@@ -1731,10 +1861,6 @@ def _normalize_router_payload(payload: Any) -> Any:
         return json.loads(text_payload)
     except json.JSONDecodeError:
         return payload
-
-
-def normalize_router_messages_map(router_messages_map: dict[str, Any]) -> dict[str, Any]:
-    return {tracking_id: _normalize_router_payload(payload) for tracking_id, payload in router_messages_map.items()}
 
 def _parse_address_components(full_address: Any) -> dict[str, str]:
     """Parse a full US-style address into address/state/city components."""
@@ -1827,6 +1953,60 @@ def _extract_address_maps_from_router_payload(
 
     return receive_province_map, sender_info_map
 
+
+def _has_sender_info_value(sender_info: dict[str, str] | None) -> bool:
+    if not isinstance(sender_info, dict):
+        return False
+    return any(str(sender_info.get(key) or "").strip() for key in ("sender_company", "sender_province", "sender_city", "sender_address"))
+
+
+def _load_address_maps_with_db_fallback(
+    dedup_ids: list[str],
+    router_messages_map: dict[str, Any],
+) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    receive_province_map: dict[str, str] = {}
+    sender_info_map: dict[str, dict[str, str]] = {}
+
+    tracking_ids_tuple = tuple(dedup_ids)
+    db_receive_fn = getattr(db, "fetch_receive_province_map", None)
+    db_sender_fn = getattr(db, "fetch_sender_info_map", None)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        future_receive = executor.submit(db_receive_fn, tracking_ids_tuple) if callable(db_receive_fn) else None
+        future_sender = executor.submit(db_sender_fn, tracking_ids_tuple) if callable(db_sender_fn) else None
+
+        if future_receive is not None:
+            receive_province_map = future_receive.result() or {}
+        if future_sender is not None:
+            sender_info_map = future_sender.result() or {}
+
+    missing_tracking_ids = [
+        tracking_id
+        for tracking_id in dedup_ids
+        if not str(receive_province_map.get(tracking_id) or "").strip()
+        or not _has_sender_info_value(sender_info_map.get(tracking_id))
+    ]
+    if not missing_tracking_ids:
+        return receive_province_map, sender_info_map
+
+    payload_receive_map, payload_sender_map = _extract_address_maps_from_router_payload(missing_tracking_ids, router_messages_map)
+
+    for tracking_id, state in payload_receive_map.items():
+        if tracking_id not in receive_province_map or not str(receive_province_map.get(tracking_id) or "").strip():
+            receive_province_map[tracking_id] = state
+
+    for tracking_id in missing_tracking_ids:
+        current_sender = sender_info_map.get(tracking_id, {})
+        payload_sender = payload_sender_map.get(tracking_id, {})
+        if not _has_sender_info_value(current_sender) and payload_sender:
+            sender_info_map[tracking_id] = payload_sender
+        elif current_sender:
+            sender_info_map[tracking_id] = current_sender
+        elif payload_sender:
+            sender_info_map[tracking_id] = payload_sender
+
+    return receive_province_map, sender_info_map
+
 def main() -> None:
     st.set_page_config(page_title="Fimile US Shipment Operations Dashboard", layout="wide")
     st.title(tr("app_title"))
@@ -1842,6 +2022,14 @@ def main() -> None:
         st.session_state["result_df"] = None
     if "failures" not in st.session_state:
         st.session_state["failures"] = []
+    if "router_messages_map" not in st.session_state:
+        st.session_state["router_messages_map"] = {}
+    if "computed_payload" not in st.session_state:
+        st.session_state["computed_payload"] = None
+    if "assignee_payload_cached" not in st.session_state:
+        st.session_state["assignee_payload_cached"] = None
+    if "dsp_download_payload" not in st.session_state:
+        st.session_state["dsp_download_payload"] = None
     today = date.today()
     default_query_end = today
     default_query_start = today - timedelta(days=1)
@@ -1913,17 +2101,22 @@ def main() -> None:
         st.session_state["metrics_ready"] = False
         st.session_state["applied_report_filter_start_date"] = None
         st.session_state["applied_report_filter_end_date"] = None
+        st.session_state["computed_payload"] = None
+        st.session_state["dsp_download_payload"] = None
         clear_query_caches()
-        with st.spinner(tr("loading_db")):
-            try:
-                raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
-                st.session_state["db_raw_ids"] = raw_ids
-                if not raw_ids:
-                    st.warning(tr("no_tracking_found"))
-            except Exception as e:
-                st.error(str(e))
-                raw_ids = []
-                st.session_state["db_raw_ids"] = []
+        progress, elapsed_text, status_text, started_at = _init_task_progress_ui("load_merge", tr("task_load_merge"))
+        try:
+            _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.05, tr("loading_db"))
+            raw_ids = fetch_tracking_numbers_by_date(start_d, end_d)
+            st.session_state["db_raw_ids"] = raw_ids
+            if not raw_ids:
+                st.warning(tr("no_tracking_found"))
+            _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.12, tr("done"))
+        except Exception as e:
+            st.error(str(e))
+            raw_ids = []
+            st.session_state["db_raw_ids"] = []
+            _finalize_task_progress("load_merge", progress, elapsed_text, status_text, started_at, str(e))
 
     if raw_ids:
         with st.expander(tr("db_preview", count=len(raw_ids)), expanded=False):
@@ -1974,26 +2167,26 @@ def main() -> None:
         sender_info_map: dict[str, dict[str, str]] = {}
         router_messages_map: dict[str, Any] = {}
         route_metadata_map: dict[str, dict[str, str]] = {}
-        progress = st.progress(0)
-        status = st.empty()
-
-        setup_steps = 4
-        completed_setup_steps = 0
-
-        def update_setup_progress(message: str) -> None:
-            nonlocal completed_setup_steps
-            completed_setup_steps += 1
-            progress.progress((completed_setup_steps / setup_steps) * 0.3)
-            status.text(message)
+        assignee_payload = None
+        progress, elapsed_text, status_text, started_at = _init_task_progress_ui("load_merge", tr("task_load_merge"))
 
         try:
+            _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.18, tr("task_step_assignee_cache"))
+            assignee_payload = load_assignee_payload_cached()
+            st.session_state["assignee_payload_cached"] = assignee_payload
+        except Exception as e:
+            st.warning(f"Failed to cache assignee list: {e}")
+            assignee_payload = st.session_state.get("assignee_payload_cached")
+
+        try:
+            _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.30, tr("task_step_router_messages"))
             fetch_router_messages = getattr(db, "fetch_router_messages_map", None)
             if callable(fetch_router_messages):
-                router_messages_map = normalize_router_messages_map(fetch_router_messages(tuple(dedup_ids)))
+                router_messages_map = fetch_router_messages(tuple(dedup_ids))
             else:
                 fallback_fetch_router_messages = globals().get("fetch_router_messages_map")
                 if callable(fallback_fetch_router_messages):
-                    router_messages_map = normalize_router_messages_map(fallback_fetch_router_messages(tuple(dedup_ids)))
+                    router_messages_map = fallback_fetch_router_messages(tuple(dedup_ids))
                 else:
                     raise AttributeError(
                         f"module 'utils.db' has no attribute 'fetch_router_messages_map' (loaded from {getattr(db, '__file__', 'unknown')})"
@@ -2001,19 +2194,17 @@ def main() -> None:
         except Exception as e:
             st.warning(f"Failed to load router_messages from DB: {e}")
             router_messages_map = {}
-        finally:
-            update_setup_progress("Loading route event payloads...")
 
         try:
-            route_metadata_map = build_route_metadata_map(router_messages_map)
+            _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.42, tr("task_step_route_metadata"))
+            route_metadata_map = build_route_metadata_map(router_messages_map, assignee_payload=assignee_payload)
         except Exception as e:
             st.warning(f"Failed to build route metadata cache: {e}")
             route_metadata_map = {}
-        finally:
-            update_setup_progress("Building route/assignee cache...")
 
         try:
-            receive_province_map, sender_info_map = _extract_address_maps_from_router_payload(
+            _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.52, tr("task_step_receiver_data"))
+            receive_province_map, sender_info_map = _load_address_maps_with_db_fallback(
                 dedup_ids,
                 router_messages_map,
             )
@@ -2021,9 +2212,7 @@ def main() -> None:
             st.warning(tr("state_region_fail", error=e))
             receive_province_map = {}
             sender_info_map = {}
-        finally:
-            update_setup_progress("Loading recipient location data...")
-            update_setup_progress("Loading sender profile data...")
+        _update_task_progress("load_merge", progress, elapsed_text, status_text, started_at, 0.60, tr("task_step_sender_data"))
 
         result_df, failures = process_tracking_ids(
             dedup_ids=dedup_ids,
@@ -2032,22 +2221,20 @@ def main() -> None:
             router_messages_map=router_messages_map,
             route_metadata_map=route_metadata_map,
             progress_bar=progress,
-            status_text=status,
-            progress_start=0.3,
+            status_text=_TaskStatusAdapter("load_merge", elapsed_text, status_text, started_at),
+            progress_start=0.60,
             progress_end=1.0,
+            include_dimensions=False,
         )
 
         result_df = fill_route_identity_columns(result_df)
         result_df = ensure_compatibility_columns(result_df)
-        result_df = apply_pricing_columns(
-            result_df,
-            include_bonus=bool(st.session_state.get("always_enable_bonus", False)),
-        )
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
+        st.session_state["router_messages_map"] = router_messages_map
 
-        status.text(tr("done"))
+        _finalize_task_progress("load_merge", progress, elapsed_text, status_text, started_at, tr("task_done"))
         st.session_state["metrics_ready"] = False
         st.session_state["applied_report_filter_start_date"] = None
         st.session_state["applied_report_filter_end_date"] = None
@@ -2061,10 +2248,39 @@ def main() -> None:
         if start_date is not None and end_date is not None and start_date > end_date:
             st.error(tr("report_filter_invalid"))
             st.session_state["metrics_ready"] = False
+            st.session_state["computed_payload"] = None
         else:
+            progress, elapsed_text, status_text, started_at = _init_task_progress_ui("compute_metrics", tr("task_compute_metrics"))
+            _update_task_progress("compute_metrics", progress, elapsed_text, status_text, started_at, 0.15, tr("task_step_validate_filters"))
             st.session_state["applied_report_filter_start_date"] = start_date
             st.session_state["applied_report_filter_end_date"] = end_date
+            working_df = apply_manual_dimension_overrides(result_df)
+
+            _update_task_progress("compute_metrics", progress, elapsed_text, status_text, started_at, 0.35, tr("task_step_apply_filters"))
+            excluded_hub_df = pd.DataFrame()
+            if st.session_state.get("exclude_atl_wdr", True):
+                excluded_hub_df = working_df[
+                    working_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(["ATL", "WDR"])
+                ].copy()
+
+            _update_task_progress("compute_metrics", progress, elapsed_text, status_text, started_at, 0.65, tr("task_step_build_route_attempts"))
+            route_attempts_df, unresolved_attempts_df, canceled_attempts_df, lost_attempts_df = build_route_attempts_view(working_df)
+            excluded_hub_route_attempts_df = pd.DataFrame()
+            if not excluded_hub_df.empty:
+                excluded_hub_route_attempts_df, _, _, _ = build_route_attempts_view(excluded_hub_df)
+
+            _update_task_progress("compute_metrics", progress, elapsed_text, status_text, started_at, 0.88, tr("task_step_prepare_exports"))
+            st.session_state["computed_payload"] = {
+                "result_df": working_df,
+                "excluded_hub_df": excluded_hub_df,
+                "route_attempts_df": route_attempts_df,
+                "unresolved_attempts_df": unresolved_attempts_df,
+                "canceled_attempts_df": canceled_attempts_df,
+                "lost_attempts_df": lost_attempts_df,
+                "excluded_hub_route_attempts_df": excluded_hub_route_attempts_df,
+            }
             st.session_state["metrics_ready"] = True
+            _finalize_task_progress("compute_metrics", progress, elapsed_text, status_text, started_at, tr("task_done"))
 
     if result_df is not None:
         known_hub_states = set(HUB_BY_STATE.keys())
@@ -2119,10 +2335,6 @@ def main() -> None:
             )
 
         result_df = apply_manual_dimension_overrides(result_df)
-        result_df = apply_pricing_columns(
-            result_df,
-            include_bonus=bool(st.session_state.get("always_enable_bonus", False)),
-        )
         st.session_state["result_df"] = result_df
 
         metrics_ready = bool(st.session_state.get("metrics_ready", False))
@@ -2154,16 +2366,13 @@ def main() -> None:
                 mime="text/csv",
             )
 
-        filtered_df = result_df.copy()
+        computed_payload = st.session_state.get("computed_payload") or {}
+        filtered_df = computed_payload.get("result_df", result_df.copy() if result_df is not None else pd.DataFrame())
         if not metrics_ready:
             st.info(tr("compute_metrics_prompt"))
 
-        excluded_hub_df = pd.DataFrame()
-        excluded_hub_route_attempts_df = pd.DataFrame()
-        if st.session_state.get("exclude_atl_wdr", True):
-            excluded_hub_df = filtered_df[
-                filtered_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(["ATL", "WDR"])
-            ].copy()
+        excluded_hub_df = computed_payload.get("excluded_hub_df", pd.DataFrame())
+        excluded_hub_route_attempts_df = computed_payload.get("excluded_hub_route_attempts_df", pd.DataFrame())
 
         if metrics_ready and (applied_filter_start is not None or applied_filter_end is not None):
             applied_parts = []
@@ -2193,9 +2402,10 @@ def main() -> None:
             key="show_detailed_tables",
         )
 
-        route_attempts_df, unresolved_attempts_df, canceled_attempts_df, lost_attempts_df = build_route_attempts_view(filtered_df)
-        if not excluded_hub_df.empty:
-            excluded_hub_route_attempts_df, _, _, _ = build_route_attempts_view(excluded_hub_df)
+        route_attempts_df = computed_payload.get("route_attempts_df", pd.DataFrame())
+        unresolved_attempts_df = computed_payload.get("unresolved_attempts_df", pd.DataFrame())
+        canceled_attempts_df = computed_payload.get("canceled_attempts_df", pd.DataFrame())
+        lost_attempts_df = computed_payload.get("lost_attempts_df", pd.DataFrame())
 
         kpi_payload = render_kpi_charts(
             filtered_df,
@@ -2316,7 +2526,11 @@ def main() -> None:
         csv_data = export_df.to_csv(index=False).encode("utf-8-sig")
         report_payload = build_layout_specific_report_payload(kpi_payload, layout_mode)
         kpi_report_data = None
-        export_route_attempts_df, _, _, _ = build_route_attempts_view(export_base_df)
+        export_route_attempts_df = route_attempts_df.copy()
+        if st.session_state.get("exclude_atl_wdr", True) and not export_route_attempts_df.empty and "Hub" in export_route_attempts_df.columns:
+            export_route_attempts_df = export_route_attempts_df[
+                ~export_route_attempts_df["Hub"].fillna("").astype(str).str.strip().str.upper().isin(["ATL", "WDR"])
+            ].copy()
         export_route_attempts_df = _filter_df_by_datetime_window(
             export_route_attempts_df,
             "finish_time",
@@ -2341,23 +2555,28 @@ def main() -> None:
             format_func=lambda value: value if value else tr("download_dsp_contractor_placeholder"),
             key="dsp_detail_contractor",
         )
-        dsp_detail_df = build_dsp_detail_export_df(export_route_attempts_df, selected_dsp_contractor)
-        dsp_metrics_df = _build_dsp_metrics_export_df(export_base_df, selected_dsp_contractor)
         dsp_workbook_title = f"{selected_dsp_contractor} {export_date_range_label} Delivered Package Details".strip()
         dsp_file_name = f"{dsp_workbook_title}.xlsx" if selected_dsp_contractor else f"DSP_Detail_{stamp}.xlsx"
-        dsp_detail_bytes = (
-            build_dsp_detail_excel_bytes(
-                dsp_detail_df,
-                dsp_workbook_title or "Delivered Package Details",
-                dsp_metrics_df=dsp_metrics_df,
-            )
-            if not dsp_detail_df.empty else b""
-        )
+
+        dsp_download_payload = st.session_state.get("dsp_download_payload")
+        dsp_download_signature = {
+            "contractor": selected_dsp_contractor,
+            "date_range": export_date_range_label,
+            "bonus": bool(st.session_state.get("always_enable_bonus", False)),
+            "exclude_atl_wdr": bool(st.session_state.get("exclude_atl_wdr", True)),
+            "row_count": int(len(export_route_attempts_df)),
+        }
+        if dsp_download_payload and dsp_download_payload.get("signature") != dsp_download_signature:
+            st.session_state["dsp_download_payload"] = None
+            dsp_download_payload = None
 
         if not selected_dsp_contractor:
             st.caption(tr("download_dsp_requires_contractor"))
-        elif dsp_detail_df.empty:
-            st.caption(tr("download_dsp_empty"))
+            dsp_preview_df = pd.DataFrame()
+        else:
+            dsp_preview_df = build_dsp_detail_export_df(export_route_attempts_df, selected_dsp_contractor)
+            if dsp_preview_df.empty:
+                st.caption(tr("download_dsp_empty"))
 
         c_csv, c_report, c_dsp = st.columns(3)
         c_csv.download_button(
@@ -2383,13 +2602,67 @@ def main() -> None:
             )
         except Exception as err:
             c_report.error(tr("report_export_failed").format(error=str(err)))
-        c_dsp.download_button(
-            tr("download_dsp_detail"),
-            data=dsp_detail_bytes,
-            file_name=dsp_file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            disabled=(not selected_dsp_contractor) or dsp_detail_df.empty,
-        )
+        with c_dsp:
+            prepare_dsp_btn = st.button(
+                tr("download_dsp_prepare_btn"),
+                key="prepare_dsp_download_btn",
+                use_container_width=True,
+                disabled=(not selected_dsp_contractor) or dsp_preview_df.empty,
+            )
+            if prepare_dsp_btn and selected_dsp_contractor:
+                progress, elapsed_text, status_text, started_at = _init_task_progress_ui("prepare_dsp", tr("task_prepare_dsp"))
+                router_messages_map = st.session_state.get("router_messages_map", {})
+                try:
+                    _update_task_progress("prepare_dsp", progress, elapsed_text, status_text, started_at, 0.20, tr("task_step_collect_dsp_price"))
+                    priced_route_attempts_df = _enrich_route_attempts_with_pricing(
+                        export_route_attempts_df,
+                        router_messages_map,
+                        include_bonus=bool(st.session_state.get("always_enable_bonus", False)),
+                        progress_callback=lambda completed, total, tracking_id: _update_task_progress(
+                            "prepare_dsp",
+                            progress,
+                            elapsed_text,
+                            status_text,
+                            started_at,
+                            0.20 + (0.55 * (completed / max(total, 1))),
+                            f"{tr('task_step_collect_dsp_price')} ({completed}/{total}) - {tracking_id}",
+                        ),
+                    )
+                    _update_task_progress("prepare_dsp", progress, elapsed_text, status_text, started_at, 0.82, tr("task_step_build_dsp_file"))
+                    dsp_detail_df = build_dsp_detail_export_df(priced_route_attempts_df, selected_dsp_contractor)
+                    dsp_metrics_df = _build_dsp_metrics_export_df(export_base_df, selected_dsp_contractor)
+                    dsp_detail_bytes = (
+                        build_dsp_detail_excel_bytes(
+                            dsp_detail_df,
+                            dsp_workbook_title or "Delivered Package Details",
+                            dsp_metrics_df=dsp_metrics_df,
+                        )
+                        if not dsp_detail_df.empty else b""
+                    )
+                    st.session_state["dsp_download_payload"] = {
+                        "signature": dsp_download_signature,
+                        "bytes": dsp_detail_bytes,
+                        "file_name": dsp_file_name,
+                        "empty": dsp_detail_df.empty,
+                    }
+                    _finalize_task_progress("prepare_dsp", progress, elapsed_text, status_text, started_at, tr("task_done"))
+                except Exception as err:
+                    st.session_state["dsp_download_payload"] = None
+                    c_dsp.error(str(err))
+
+            ready_payload = st.session_state.get("dsp_download_payload")
+            if ready_payload and ready_payload.get("signature") == dsp_download_signature:
+                if ready_payload.get("empty"):
+                    st.caption(tr("download_dsp_empty"))
+                else:
+                    st.caption(tr("download_dsp_ready"))
+                    st.download_button(
+                        tr("download_dsp_detail"),
+                        data=ready_payload.get("bytes", b""),
+                        file_name=ready_payload.get("file_name", dsp_file_name),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
 
 
 if __name__ == "__main__":
