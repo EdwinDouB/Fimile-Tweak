@@ -1361,6 +1361,7 @@ def build_row(
         "Drivers": json.dumps(drivers, ensure_ascii=False),
         "Route_names": json.dumps(route_names, ensure_ascii=False),
         "Weight": _extract_weight_from_payload(payload),
+        "Volume": _extract_volume_from_payload(payload),
         "created_time": fmt_dt(created_time),
         "first_scanned_time": fmt_dt(first_scanned_time),
         "last_scanned_time": fmt_dt(to_local_dt(intervals[-1].get("time") if intervals else None)),
@@ -1420,8 +1421,9 @@ def _first_non_empty(*values: Any) -> str:
     return ""
 
 
-def _extract_weight_from_payload(payload: Any) -> str:
-    weights: list[float] = []
+def _extract_numeric_dimension_from_payload(payload: Any, dimension_type: str) -> str:
+    values: list[float] = []
+    target_dimension_type = str(dimension_type or "").strip().upper()
 
     def _parse_numeric(raw_value: Any) -> float | None:
         text = str(raw_value or "").strip()
@@ -1444,14 +1446,14 @@ def _extract_weight_from_payload(payload: Any) -> str:
                         continue
                     dim_type = str(dim.get("t") or "").strip().upper()
                     dim_value = dim.get("v")
-                    if dim_type == "WEIGHT":
+                    if dim_type == target_dimension_type:
                         parsed = _parse_numeric(dim_value)
                         if parsed is not None:
-                            weights.append(parsed)
-                    elif isinstance(dim_value, str) and dim_value.lower().startswith("pw:"):
+                            values.append(parsed)
+                    elif target_dimension_type == "WEIGHT" and isinstance(dim_value, str) and dim_value.lower().startswith("pw:"):
                         parsed = _parse_numeric(dim_value.split(":", 1)[-1])
                         if parsed is not None:
-                            weights.append(parsed)
+                            values.append(parsed)
 
             for value in node.values():
                 _walk(value)
@@ -1462,12 +1464,20 @@ def _extract_weight_from_payload(payload: Any) -> str:
                 _walk(item)
 
     _walk(payload)
-    if not weights:
+    if not values:
         return ""
-    value = weights[0]
+    value = values[0]
     if value.is_integer():
         return str(int(value))
     return f"{value:.2f}".rstrip("0").rstrip(".")
+
+
+def _extract_weight_from_payload(payload: Any) -> str:
+    return _extract_numeric_dimension_from_payload(payload, "WEIGHT")
+
+
+def _extract_volume_from_payload(payload: Any) -> str:
+    return _extract_numeric_dimension_from_payload(payload, "VOLUME")
 
 
 def extract_route_identity_from_payload(payload: dict[str, Any]) -> dict[str, str]:

@@ -1,5 +1,6 @@
 
 
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +8,23 @@ import pandas as pd
 import streamlit as st
 
 from utils.constants import I18N
+
+
+PRICE_CARD_RANGES: list[tuple[int, int, float]] = [
+    (1, 30, 8.0),
+    (31, 40, 9.0),
+    (41, 50, 10.0),
+    (51, 60, 11.0),
+    (61, 70, 12.0),
+    (71, 80, 13.0),
+    (81, 90, 14.0),
+    (91, 100, 15.0),
+    (101, 110, 17.0),
+    (111, 120, 19.0),
+    (121, 130, 21.0),
+    (131, 140, 23.0),
+    (141, 150, 26.0),
+]
 
 
 def read_config(key: str, default: str = "") -> str:
@@ -136,6 +154,60 @@ def calculate_package_evaluation_weight(df: pd.DataFrame) -> pd.Series:
             return numeric_weight.fillna(1.0).clip(lower=0)
 
     return pd.Series(1.0, index=df.index, dtype="float64")
+
+
+def _round_measurement_series(series: pd.Series) -> pd.Series:
+    rounded = series.round(2)
+    return rounded.where(rounded.notna(), pd.NA)
+
+
+def _lookup_price_by_billable_weight(value: float | int | None, *, include_bonus: bool = False) -> float | None:
+    if value is None or pd.isna(value):
+        return None
+
+    try:
+        normalized_weight = math.ceil(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+    if normalized_weight <= 0:
+        return None
+
+    for start_weight, end_weight, price in PRICE_CARD_RANGES:
+        if start_weight <= normalized_weight <= end_weight:
+            return price + (2.0 if include_bonus else 0.0)
+    return None
+
+
+def apply_pricing_columns(df: pd.DataFrame, *, include_bonus: bool = False) -> pd.DataFrame:
+    """Add/refresh Volume, Dim_weight, Billable_weight and Price columns."""
+    enriched_df = df.copy()
+    if enriched_df.empty:
+        for column in ["Volume", "Dim_weight", "Billable_weight", "Price"]:
+            if column not in enriched_df.columns:
+                enriched_df[column] = pd.Series(dtype="float64")
+        return enriched_df
+
+    weight_series = pd.to_numeric(enriched_df.get("Weight", pd.Series(index=enriched_df.index, dtype="object")), errors="coerce")
+    volume_series = pd.to_numeric(enriched_df.get("Volume", pd.Series(index=enriched_df.index, dtype="object")), errors="coerce")
+    dim_weight_series = volume_series / 250.0
+    dim_weight_series = dim_weight_series.where(volume_series.notna(), pd.NA)
+
+    billable_weight_series = pd.concat([weight_series, dim_weight_series], axis=1).max(axis=1, skipna=True)
+    billable_weight_series = billable_weight_series.where(
+        weight_series.notna() | pd.Series(dim_weight_series).notna(),
+        pd.NA,
+    )
+
+    price_series = billable_weight_series.apply(
+        lambda value: _lookup_price_by_billable_weight(value, include_bonus=include_bonus)
+    )
+
+    enriched_df["Volume"] = volume_series.where(volume_series.notna(), pd.NA)
+    enriched_df["Dim_weight"] = _round_measurement_series(dim_weight_series)
+    enriched_df["Billable_weight"] = _round_measurement_series(billable_weight_series)
+    enriched_df["Price"] = _round_measurement_series(price_series)
+    return enriched_df
 
 def to_local_dt(ts_millis: int | float | None, local_tz=timezone.utc) -> datetime | None:
     """Convert unix timestamp in milliseconds to timezone-aware datetime."""

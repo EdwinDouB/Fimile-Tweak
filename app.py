@@ -208,6 +208,10 @@ def build_route_attempts_view(
                     "Contractor": contractor_name,
                     "Driver": driver_name,
                     "Weight": row.get("Weight", ""),
+                    "Volume": row.get("Volume", ""),
+                    "Dim_weight": row.get("Dim_weight", ""),
+                    "Billable_weight": row.get("Billable_weight", ""),
+                    "Price": row.get("Price", ""),
                     "delivered_time": row.get("delivered_time", ""),
                     "POD是否合格": "是" if _pod_qualified(matched_terminal.get("POD")) else "否",
                 }
@@ -695,6 +699,11 @@ def build_tracking_display_df(
         "Hub",
         "Contractor",
         "Driver",
+        "Weight",
+        "Volume",
+        "Dim_weight",
+        "Billable_weight",
+        "Price",
         "created_time",
     ]
     existing_columns = [col for col in preferred_columns if col in display_df.columns]
@@ -1341,12 +1350,24 @@ def _sanitize_excel_sheet_name(sheet_name: str, fallback: str = "Sheet1") -> str
 
 
 def build_dsp_detail_export_df(route_attempts_df: pd.DataFrame, contractor_name: str) -> pd.DataFrame:
+    empty_columns = [
+        "Tracking_number",
+        "Date_of_Delivery",
+        "Hub",
+        "Route_name",
+        "Driver name",
+        "Weight",
+        "Volume",
+        "Dim weight",
+        "Billable weight",
+        "Price",
+    ]
     if route_attempts_df.empty:
-        return pd.DataFrame(columns=["NO.", "Tracking_number", "Date_of_Delivery", "Route_name", "Driver name", "Weight"])
+        return pd.DataFrame(columns=empty_columns)
 
     contractor_value = str(contractor_name or "").strip()
     if not contractor_value:
-        return pd.DataFrame(columns=["NO.", "Tracking_number", "Date_of_Delivery", "Route_name", "Driver name", "Weight"])
+        return pd.DataFrame(columns=empty_columns)
 
     detail_df = route_attempts_df.copy()
     detail_df["Contractor"] = detail_df.get("Contractor", "").fillna("").astype(str).str.strip()
@@ -1355,7 +1376,7 @@ def build_dsp_detail_export_df(route_attempts_df: pd.DataFrame, contractor_name:
         & detail_df["Contractor"].str.casefold().eq(contractor_value.casefold())
     ].copy()
     if detail_df.empty:
-        return pd.DataFrame(columns=["NO.", "Tracking_number", "Date_of_Delivery", "Route_name", "Driver name", "Weight"])
+        return pd.DataFrame(columns=empty_columns)
 
     delivered_sort_series = detail_df.get("delivered_time", pd.Series("", index=detail_df.index)).fillna("").astype(str).str.strip()
     finish_sort_series = detail_df.get("finish_time", pd.Series("", index=detail_df.index)).fillna("").astype(str).str.strip()
@@ -1368,12 +1389,16 @@ def build_dsp_detail_export_df(route_attempts_df: pd.DataFrame, contractor_name:
     finish_series = detail_df.get("finish_time", pd.Series("", index=detail_df.index)).fillna("").astype(str).str.strip()
     export_df = pd.DataFrame(
         {
-            "NO.": range(1, len(detail_df) + 1),
             "Tracking_number": detail_df.get("tracking_id", "").fillna("").astype(str).str.strip(),
             "Date_of_Delivery": delivered_series.where(delivered_series.ne(""), finish_series),
+            "Hub": detail_df.get("Hub", "").fillna("").astype(str).str.strip(),
             "Route_name": detail_df.get("route", "").fillna("").astype(str).str.strip(),
             "Driver name": detail_df.get("Driver", "").fillna("").astype(str).str.strip(),
-            "Weight": detail_df.get("Weight", "").fillna("").astype(str).str.strip(),
+            "Weight": pd.to_numeric(detail_df.get("Weight", pd.Series(index=detail_df.index, dtype="object")), errors="coerce"),
+            "Volume": pd.to_numeric(detail_df.get("Volume", pd.Series(index=detail_df.index, dtype="object")), errors="coerce"),
+            "Dim weight": pd.to_numeric(detail_df.get("Dim_weight", pd.Series(index=detail_df.index, dtype="object")), errors="coerce").round(2),
+            "Billable weight": pd.to_numeric(detail_df.get("Billable_weight", pd.Series(index=detail_df.index, dtype="object")), errors="coerce").round(2),
+            "Price": pd.to_numeric(detail_df.get("Price", pd.Series(index=detail_df.index, dtype="object")), errors="coerce").round(2),
         }
     )
     return export_df
@@ -1683,6 +1708,8 @@ def main() -> None:
         st.session_state["contractor_override_name"] = ""
     if "dsp_detail_contractor" not in st.session_state:
         st.session_state["dsp_detail_contractor"] = ""
+    if "always_enable_bonus" not in st.session_state:
+        st.session_state["always_enable_bonus"] = False
     st.selectbox(
         tr("language_label"),
         options=["zh", "en"],
@@ -1735,12 +1762,16 @@ def main() -> None:
             st.write(raw_ids[:50])
 
     st.markdown(f"#### {tr('report_filter_title')}")
-    filter_cols = st.columns([1, 1, 0.7])
+    filter_cols = st.columns([1, 1, 0.9, 0.8])
     with filter_cols[0]:
         st.date_input(tr("report_filter_start_label"), key="report_filter_start_date", value=None)
     with filter_cols[1]:
         st.date_input(tr("report_filter_end_label"), key="report_filter_end_date", value=None)
     with filter_cols[2]:
+        st.write("")
+        st.write("")
+        st.toggle("是否总是启用Bonus", key="always_enable_bonus")
+    with filter_cols[3]:
         st.write("")
         st.write("")
         calc_btn = st.button(
@@ -1840,6 +1871,10 @@ def main() -> None:
 
         result_df = fill_route_identity_columns(result_df)
         result_df = ensure_compatibility_columns(result_df)
+        result_df = apply_pricing_columns(
+            result_df,
+            include_bonus=bool(st.session_state.get("always_enable_bonus", False)),
+        )
 
         st.session_state["result_df"] = result_df
         st.session_state["failures"] = failures
@@ -1916,6 +1951,11 @@ def main() -> None:
             )
 
         result_df = apply_manual_dimension_overrides(result_df)
+        result_df = apply_pricing_columns(
+            result_df,
+            include_bonus=bool(st.session_state.get("always_enable_bonus", False)),
+        )
+        st.session_state["result_df"] = result_df
 
         metrics_ready = bool(st.session_state.get("metrics_ready", False))
         applied_filter_start = st.session_state.get("applied_report_filter_start_date")
@@ -1946,7 +1986,7 @@ def main() -> None:
                 mime="text/csv",
             )
 
-        filtered_df = result_df
+        filtered_df = result_df.copy()
         if not metrics_ready:
             st.info(tr("compute_metrics_prompt"))
 
