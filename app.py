@@ -1349,6 +1349,111 @@ def _sanitize_excel_sheet_name(sheet_name: str, fallback: str = "Sheet1") -> str
     return cleaned[:31]
 
 
+DSP_CORE_KPI_CONFIG = [
+    {
+        "source_metric": "<24h delivery rate",
+        "display_name": "24 hour delivery rate",
+        "name_font_color": "#1f4e78",
+        "thresholds": [
+            (0.988, "#2e7d32"),
+            (0.95, "#c6e0b4"),
+            (0.90, "#ffd966"),
+            (float("-inf"), "#f4cccc"),
+        ],
+    },
+    {
+        "source_metric": "Manual POD qualified rate",
+        "display_name": "POD compliance rate",
+        "name_font_color": "#9e480e",
+        "thresholds": [
+            (1.0, "#2e7d32"),
+            (0.998, "#c6e0b4"),
+            (0.95, "#ffd966"),
+            (float("-inf"), "#f4cccc"),
+        ],
+    },
+    {
+        "source_metric": "24h attempt rate",
+        "display_name": "24 hour attempt rate",
+        "name_font_color": "#7030a0",
+        "thresholds": [
+            (1.0, "#2e7d32"),
+            (0.998, "#c6e0b4"),
+            (0.95, "#ffd966"),
+            (float("-inf"), "#f4cccc"),
+        ],
+    },
+]
+
+
+def _normalize_dsp_metric_display_name(metric_name: str) -> str:
+    normalized_name = str(metric_name or "").strip()
+    rename_map = {
+        "<24h delivery rate": "24 hour delivery rate",
+        "Manual POD qualified rate": "POD compliance rate",
+        "POD qualified rate": "POD compliance rate",
+        "24h attempt rate": "24 hour attempt rate",
+    }
+    return rename_map.get(normalized_name, normalized_name)
+
+
+def _build_dsp_metrics_export_df(source_df: pd.DataFrame, contractor_name: str) -> pd.DataFrame:
+    output_columns = ["Metric", "Hit", "Total", "Rate", "_is_core", "_name_font_color", "_rate_bg_color", "_sort_order"]
+    if source_df is None or source_df.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    contractor_value = str(contractor_name or "").strip()
+    if not contractor_value:
+        return pd.DataFrame(columns=output_columns)
+
+    contractor_df = source_df.copy()
+    if "Contractor" not in contractor_df.columns:
+        return pd.DataFrame(columns=output_columns)
+    contractor_df["Contractor"] = contractor_df["Contractor"].fillna("").astype(str).str.strip()
+    contractor_df = contractor_df[contractor_df["Contractor"].str.casefold().eq(contractor_value.casefold())].copy()
+    if contractor_df.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    payload = build_kpi_report_payload(contractor_df)
+    metrics = payload.get("metrics", [])
+    if not isinstance(metrics, list) or not metrics:
+        return pd.DataFrame(columns=output_columns)
+
+    core_map = {item["source_metric"]: item for item in DSP_CORE_KPI_CONFIG}
+    rows: list[dict[str, Any]] = []
+    for index, metric in enumerate(metrics):
+        if not isinstance(metric, dict):
+            continue
+        source_metric_name = str(metric.get("metric") or "").strip()
+        config = core_map.get(source_metric_name)
+        rate_value = float(metric.get("rate") or 0.0)
+        rate_bg_color = ""
+        if config is not None:
+            for min_value, bg_color in config["thresholds"]:
+                if rate_value >= min_value:
+                    rate_bg_color = bg_color
+                    break
+        rows.append(
+            {
+                "Metric": config["display_name"] if config is not None else _normalize_dsp_metric_display_name(source_metric_name),
+                "Hit": int(metric.get("hit", 0) or 0),
+                "Total": int(metric.get("total", 0) or 0),
+                "Rate": rate_value,
+                "_is_core": config is not None,
+                "_name_font_color": config["name_font_color"] if config is not None else "",
+                "_rate_bg_color": rate_bg_color,
+                "_sort_order": DSP_CORE_KPI_CONFIG.index(config) if config is not None else len(DSP_CORE_KPI_CONFIG) + index,
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(columns=output_columns)
+
+    metrics_df = pd.DataFrame(rows)
+    metrics_df = metrics_df.sort_values(by=["_sort_order", "Metric"], ascending=[True, True], kind="stable").reset_index(drop=True)
+    return metrics_df
+
+
 def build_dsp_detail_export_df(route_attempts_df: pd.DataFrame, contractor_name: str) -> pd.DataFrame:
     empty_columns = [
         "Tracking_number",
@@ -1404,11 +1509,74 @@ def build_dsp_detail_export_df(route_attempts_df: pd.DataFrame, contractor_name:
     return export_df
 
 
-def build_dsp_detail_excel_bytes(detail_df: pd.DataFrame, workbook_title: str) -> bytes:
+def build_dsp_detail_excel_bytes(
+    detail_df: pd.DataFrame,
+    workbook_title: str,
+    dsp_metrics_df: pd.DataFrame | None = None,
+) -> bytes:
     output = io.BytesIO()
     sheet_name = _sanitize_excel_sheet_name(workbook_title, fallback="Overview")
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         detail_df.to_excel(writer, index=False, sheet_name=sheet_name)
+        workbook = writer.book
+        worksheet = writer.sheets[sheet_name]
+
+        header_fmt = workbook.add_format({"bold": True, "bg_color": "#1f4e78", "font_color": "#ffffff", "border": 1})
+        number_fmt = workbook.add_format({"border": 1, "num_format": "0"})
+        percent_fmt = workbook.add_format({"border": 1, "num_format": "0.00%"})
+        title_fmt = workbook.add_format({"bold": True, "font_size": 12})
+
+        for col_idx, column_name in enumerate(detail_df.columns):
+            worksheet.write(0, col_idx, column_name, header_fmt)
+
+        if not detail_df.empty:
+            for col_idx, column_name in enumerate(detail_df.columns):
+                if column_name in {"Weight", "Volume", "Dim weight", "Billable weight", "Price"}:
+                    worksheet.set_column(col_idx, col_idx, 14)
+                elif column_name in {"Tracking_number", "Route_name"}:
+                    worksheet.set_column(col_idx, col_idx, 24)
+                else:
+                    worksheet.set_column(col_idx, col_idx, 18)
+
+        visible_metric_columns = ["Metric", "Hit", "Total", "Rate"]
+        if dsp_metrics_df is not None and not dsp_metrics_df.empty:
+            metrics_start_col = len(detail_df.columns) + 2
+            worksheet.write(0, metrics_start_col, "DSP KPI Metrics", title_fmt)
+            for col_offset, column_name in enumerate(visible_metric_columns):
+                worksheet.write(1, metrics_start_col + col_offset, column_name, header_fmt)
+
+            for row_offset, (_, metric_row) in enumerate(dsp_metrics_df.iterrows(), start=2):
+                is_core = bool(metric_row.get("_is_core", False))
+                metric_name = str(metric_row.get("Metric", "") or "")
+                name_font_color = str(metric_row.get("_name_font_color", "") or "")
+                rate_bg_color = str(metric_row.get("_rate_bg_color", "") or "")
+
+                metric_name_fmt = workbook.add_format(
+                    {
+                        "border": 1,
+                        "bold": is_core,
+                        **({"font_color": name_font_color} if name_font_color else {}),
+                    }
+                )
+                metric_value_fmt = workbook.add_format({"border": 1, "bold": is_core})
+                metric_rate_fmt = workbook.add_format(
+                    {
+                        "border": 1,
+                        "bold": is_core,
+                        "num_format": "0.00%",
+                        **({"bg_color": rate_bg_color} if rate_bg_color else {}),
+                    }
+                )
+
+                worksheet.write(row_offset, metrics_start_col, metric_name, metric_name_fmt)
+                worksheet.write_number(row_offset, metrics_start_col + 1, int(metric_row.get("Hit", 0) or 0), metric_value_fmt if is_core else number_fmt)
+                worksheet.write_number(row_offset, metrics_start_col + 2, int(metric_row.get("Total", 0) or 0), metric_value_fmt if is_core else number_fmt)
+                worksheet.write_number(row_offset, metrics_start_col + 3, float(metric_row.get("Rate", 0.0) or 0.0), metric_rate_fmt if is_core else percent_fmt)
+
+            worksheet.set_column(metrics_start_col, metrics_start_col, 28)
+            worksheet.set_column(metrics_start_col + 1, metrics_start_col + 2, 12)
+            worksheet.set_column(metrics_start_col + 3, metrics_start_col + 3, 14)
+
     return output.getvalue()
 
 
@@ -2174,9 +2342,17 @@ def main() -> None:
             key="dsp_detail_contractor",
         )
         dsp_detail_df = build_dsp_detail_export_df(export_route_attempts_df, selected_dsp_contractor)
+        dsp_metrics_df = _build_dsp_metrics_export_df(export_base_df, selected_dsp_contractor)
         dsp_workbook_title = f"{selected_dsp_contractor} {export_date_range_label} Delivered Package Details".strip()
         dsp_file_name = f"{dsp_workbook_title}.xlsx" if selected_dsp_contractor else f"DSP_Detail_{stamp}.xlsx"
-        dsp_detail_bytes = build_dsp_detail_excel_bytes(dsp_detail_df, dsp_workbook_title or "Delivered Package Details") if not dsp_detail_df.empty else b""
+        dsp_detail_bytes = (
+            build_dsp_detail_excel_bytes(
+                dsp_detail_df,
+                dsp_workbook_title or "Delivered Package Details",
+                dsp_metrics_df=dsp_metrics_df,
+            )
+            if not dsp_detail_df.empty else b""
+        )
 
         if not selected_dsp_contractor:
             st.caption(tr("download_dsp_requires_contractor"))
