@@ -4,7 +4,7 @@ import ast
 import io
 import json
 import re
-import time
+import time as pytime
 
 import utils.db as db
 import utils.report as report_utils
@@ -26,7 +26,7 @@ def _init_task_progress_ui(task_key: str, title: str) -> tuple[Any, Any, Any, fl
         progress_bar = st.progress(0.0)
         elapsed_placeholder = st.empty()
         status_placeholder = st.empty()
-    started_at = time.perf_counter()
+    started_at = pytime.perf_counter()
     elapsed_placeholder.caption("Elapsed: 0.0 s" if st.session_state.get("language") == "en" else "已耗时：0.0 秒")
     ready_text = tr("task_ready")
     status_placeholder.caption(
@@ -47,7 +47,7 @@ def _update_task_progress(
     status_text: str,
 ) -> None:
     normalized_progress = min(max(float(progress_value), 0.0), 1.0)
-    elapsed_seconds = max(0.0, time.perf_counter() - started_at)
+    elapsed_seconds = max(0.0, pytime.perf_counter() - started_at)
     progress_bar.progress(normalized_progress)
     elapsed_placeholder.caption(
         f"Elapsed: {elapsed_seconds:.1f} s" if st.session_state.get("language") == "en" else f"已耗时：{elapsed_seconds:.1f} 秒"
@@ -92,7 +92,7 @@ class _TaskStatusAdapter:
         self.started_at = started_at
 
     def text(self, message: str) -> None:
-        elapsed_seconds = max(0.0, time.perf_counter() - self.started_at)
+        elapsed_seconds = max(0.0, pytime.perf_counter() - self.started_at)
         self.elapsed_placeholder.caption(
             f"Elapsed: {elapsed_seconds:.1f} s" if st.session_state.get("language") == "en" else f"已耗时：{elapsed_seconds:.1f} 秒"
         )
